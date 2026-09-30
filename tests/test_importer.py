@@ -135,6 +135,40 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def test_skip_unsupported_force_keeps_installed_component(self):
+        self.install()
+        self.assertTrue((self.dest / 'skills/demo-hello').is_symlink())
+        # The source gains a restriction OpenCode cannot preserve.
+        self.skill('hello', extra='allowed-tools: [Bash]\n')
+        with mock.patch.object(im, 'warn'):
+            self.install(skip=True, mode='force')
+        self.assertTrue((self.dest / 'skills/demo-hello').is_symlink(),
+                        'a component skipped this run must not be pruned as removed upstream')
+        state = json.loads((self.dest / '.plugin-importer/manifest.json').read_text())
+        self.assertIn('skills/demo-hello', state['plugins']['demo']['items'])
+
+    def test_skip_unsupported_sync_reports_skip_not_removal(self):
+        self.install()
+        self.skill('hello', extra='allowed-tools: [Bash]\n')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(skip=True)
+        printed = output.getvalue()
+        self.assertIn('KEEP skills/demo-hello (skipped this run', printed)
+        self.assertNotIn('(removed upstream)', printed)
+
+    def test_migration_log_not_stale_when_failure_precedes_build(self):
+        # A first run that converts something must not leave paths for a later failing run.
+        self.skill('z-guarded', extra='allowed-tools: [Bash]\n')
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(im.main([str(self.source), '--config-dir', str(self.dest)]), 1)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            # Fails on plugin selection, before any component is converted.
+            self.assertEqual(im.main([str(self.source), '--plugin', 'absent',
+                                      '--config-dir', str(self.base / 'other config')]), 1)
+        self.assertNotIn('Manual migration list', errors.getvalue())
+
     def test_mcp_merge_prints_server_names(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
         output = io.StringIO()

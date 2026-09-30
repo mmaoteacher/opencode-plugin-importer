@@ -445,11 +445,14 @@ def agent_convert(meta):
     return result
 
 
-MIGRATION_LOG = []
+def build_payload(root, manifests, namespace, destination, kinds, staging, fix=False, skip=False,
+                  migration_log=None, skipped=None):
+    """Convert one plugin into OpenCode resources.
 
-
-def build_payload(root, manifests, namespace, destination, kinds, staging, fix=False, skip=False):
-    MIGRATION_LOG.clear()
+    migration_log collects (export, source path) for convertible items so a later failure
+    can hand the user a manual path list. skipped collects exports this run refused to
+    convert; a skipped export is still present upstream, so an installed copy must survive.
+    """
     check_tree(root)
     fingerprint = tree_hash(root)
     key = digest(encoded([VERSION, fingerprint, namespace, str(destination), sorted(kinds)]))[:24]
@@ -473,28 +476,31 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
         for name, (relative, meta, body) in entries(root, manifests, kind, fix).items():
             exported = valid_name(f'{namespace}-{name}')
             if kind == 'skills':
+                export = f'skills/{exported}'
                 if meta.get('disable-model-invocation') or meta.get('user-invocable') is False or meta.get('allowed-tools'):
                     message = f'Skill {name} uses invocation/tool restrictions OpenCode cannot preserve; adapt it explicitly.'
                     if not skip:
                         fail(message)
                     warn(f'Skipping skill {name}: {message}')
+                    skipped.add(export)
                     continue
                 meta['name'] = exported
-                export = f'skills/{exported}'
                 linked = installed / relative.parent
             else:
+                export = f'agents/{exported}.md'
                 try:
                     meta = agent_convert(meta)
                 except ImportErrorDetail as exc:
                     if not skip:
                         raise
                     warn(f'Skipping agent {name}: {exc}')
+                    skipped.add(export)
                     continue
-                export = f'agents/{exported}.md'
                 linked = installed / relative
             write_markdown(staging / relative, meta, root_tokens(body, installed))
             desired[export] = {'kind': kind, 'link': os.path.relpath(linked, (destination / export).parent)}
-            MIGRATION_LOG.append((export, str(root / (relative.parent if kind == 'skills' else relative))))
+            if migration_log is not None:
+                migration_log.append((export, str(root / (relative.parent if kind == 'skills' else relative))))
     if 'mcp' in kinds:
         for name, config in mcp_entries(root, manifests, fix).items():
             exported = valid_name(f'{namespace}-{name}')
@@ -504,9 +510,11 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
                 if not skip:
                     raise
                 warn(f'Skipping MCP server {name}: {exc}')
+                skipped.add(f'mcp/{exported}')
                 continue
             desired[f'mcp/{exported}'] = {'kind': 'mcp', 'value': value}
-            MIGRATION_LOG.append((f'mcp/{exported}', None))
+            if migration_log is not None:
+                migration_log.append((f'mcp/{exported}', None))
     if any((root / path).exists() for path in ('hooks', 'hooks.json', 'commands')) or any('hooks' in m for m in manifests):
         warn('Hooks and slash-command definitions are not imported; only skills, Markdown agents and MCP are supported.')
     check_tree(staging)
@@ -619,7 +627,7 @@ def check_owned(root, export, old, config, checked):
                 fail(f'Unmanaged or locally modified export: {path}')
 
 
-def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input):
+def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input, skipped=frozenset()):
     old_plugin = state['plugins'].get(namespace, {})
     old_items = old_plugin.get('items', {})
     if not isinstance(old_items, dict):
@@ -630,6 +638,10 @@ def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input):
     changes = []
     checked = set()
     selected = set(desired) | {k for k, v in old_items.items() if v.get('kind') in kinds}
+    # A skipped export still exists upstream; an installed copy must survive this run.
+    selected -= skipped
+    for export in sorted(skipped & set(old_items)):
+        print(f'KEEP {export} (skipped this run; unsupported upstream, not removed)')
     # Validate everything first, before prompts or writes.
     for export in sorted(selected):
         check_owned(root, export, old_items.get(export), config, checked)
@@ -764,8 +776,13 @@ def install_lock(root, preview):
 
 
 def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', preview=False, listing=False, ask=input,
-            fix=False, skip=False, manual=False):
+            fix=False, skip=False, manual=False, migration_log=None, skipped=None):
     root = Path(root).expanduser().resolve()
+    # Caller-owned so a failure before build_payload cannot report a previous run's paths.
+    if migration_log is None:
+        migration_log = []
+    if skipped is None:
+        skipped = set()
     with source_tree(source, ref) as (repo, locator, revision):
         fallback_name = Path(locator.rstrip('/')).name.removesuffix('.git')
         plugins = discover(repo, fallback_name, fix)
@@ -792,13 +809,15 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
             fail('Destination must not be inside the source plugin.')
         with tempfile.TemporaryDirectory(prefix='opencode-import-payload-') as temp:
             staging = Path(temp) / 'payload'
-            desired, fingerprint, snapshot = build_payload(plugin_root, manifests, namespace, root, kinds, staging, fix, skip)
+            desired, fingerprint, snapshot = build_payload(plugin_root, manifests, namespace, root, kinds,
+                                                           staging, fix=fix, skip=skip,
+                                                           migration_log=migration_log, skipped=skipped)
             if listing:
                 for key in sorted(desired):
                     print(key)
                 return
             if manual:
-                print_manual_script(desired, MIGRATION_LOG)
+                print_manual_script(desired, migration_log)
                 return
             with install_lock(root, preview):
                 for item in desired.values():
@@ -807,7 +826,8 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
                 old = state['plugins'].get(namespace)
                 if old and (old.get('source') != locator or old.get('plugin') != selected_plugin):
                     fail('Namespace belongs to a different source. Choose another --namespace.')
-                retained, changes, merged = make_plan(root, state, namespace, desired, kinds, mode, preview, ask)
+                retained, changes, merged = make_plan(root, state, namespace, desired, kinds, mode,
+                                                       preview, ask, skipped)
                 entry = {'source': locator, 'plugin': selected_plugin, 'ref': ref, 'revision': revision,
                          'source_hash': fingerprint, 'items': retained}
                 # No accepted changes means no metadata writes, even when prompts were declined.
@@ -859,15 +879,17 @@ def main(argv=None):
     parser.add_argument('--version', action='version', version=VERSION)
     args = parser.parse_args(argv)
     kinds = {k for k in KINDS if getattr(args, k + '_only')} or KINDS
+    migration_log = []
     try:
         install(args.config_dir, args.source, args.ref, args.plugin, args.namespace, kinds,
                 'interactive' if args.interactive else 'force' if args.force else 'sync', args.dry_run, args.list,
-                fix=args.fix_names, skip=args.skip_unsupported, manual=args.manual_mode)
+                fix=args.fix_names, skip=args.skip_unsupported, manual=args.manual_mode,
+                migration_log=migration_log)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)
-        if im_migration := MIGRATION_LOG:
-            print('Manual migration list (nothing was written):', file=sys.stderr)
-            for export, source in im_migration:
+        if migration_log:
+            print('Manual migration list (converted but not installed):', file=sys.stderr)
+            for export, source in migration_log:
                 if source:
                     print(f'  {source} -> {export}', file=sys.stderr)
                 else:

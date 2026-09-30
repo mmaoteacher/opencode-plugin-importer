@@ -11,7 +11,7 @@
 
 | 項目 | 指令 | 實際結果 | 結果 | 證據／備註 |
 |---|---|---|---|---|
-| 單元／整合測試 | `.venv/bin/python -m unittest discover -s tests` | Ran 51 tests，OK | ✅ | 基準 41 項全數保留，新增 10 項 |
+| 單元／整合測試 | `.venv/bin/python -m unittest discover -s tests` | Ran 54 tests，OK | ✅ | 基準 41 項全數保留，新增 13 項（末 3 項為 code review 修正後補的回歸測試） |
 | Shell 語法 | `bash -n skills/install-plugin/scripts/install-plugin.sh` | 無輸出，exit 0 | ✅ | |
 | OpenCode 實機 | `.venv/bin/python tests/check_opencode.py` | 發現 skill 與 agent，MCP 握手 connected | ✅ | 隔離 XDG 環境，未呼叫模型，未動 `~/.config/opencode` |
 
@@ -37,6 +37,9 @@
 | `--list` 不寫目的地 | CLI | `--list --fix-names --skip-unsupported` | 只列元件 | 列出 skills/agents/mcp；`dest2` 未建立 | ✅ | |
 | `--dry-run` 不寫目的地 | CLI | `--dry-run` | 不寫、不互動 | 失敗路徑印 "nothing was written"；`dest2` 未建立 | ✅ | |
 | 未選元件快照不變 | CLI + 讀檔 | 全量安裝後執行 `--skills-only` | 未選的 MCP 項快照與設定值不變 | MCP 項仍指向原快照 `de8a0ce…`，`opencode.json` 的 mcp 值未變 | ✅ | 已用 `git worktree` 於基準版 bdadac8 比對，行為一致，非本次迴歸 |
+| 跳過不影響既有安裝（code review 補驗） | CLI | 已安裝 skill，來源改為不支援，重跑 `--skip-unsupported --force` | 既有元件保留，不被當成上游移除 | `KEEP skills/reg-safe (skipped this run; unsupported upstream, not removed)`，元件仍在 | ✅ | 修正前此情境會 `REMOVE` 並刪除檔案（資料遺失），已由 `test_skip_unsupported_force_keeps_installed_component` 覆蓋 |
+| 真正移除仍會被 prune（code review 補驗） | CLI | 來源刪除一個 skill，另一個加上限制，重跑 `--skip-unsupported --force` | 僅真正移除者被刪 | `REMOVE skills/reg3-drop` 被刪；`KEEP skills/reg3-keep` 保留 | ✅ | 確認修正未使 `--force` 失效 |
+| 失敗清單不跨執行殘留（code review 補驗） | 自動化 | 先跑一次會轉換的匯入，再跑一次早期失敗的匯入 | 第二次不印出第一次的路徑 | 輸出不含 `Manual migration list` | ✅ | 修正前會印出前次殘留路徑，由 `test_migration_log_not_stale_when_failure_precedes_build` 覆蓋 |
 | 不動日常設定 | 全程 | 所有執行 | 未寫入 `~/.config/opencode` | 全部使用 `--config-dir` 指向暫存目錄 | ✅ | |
 
 ## E2E（適用時）
@@ -46,11 +49,18 @@
 - 測試依據：不適用（無 YouTrack issue，需求來源為 `plugin-import-session.md`）
 - Markdown 報告：無
 - PDF 報告：無
-- 結果摘要：功能矩陣 17 項全數通過
+- 結果摘要：功能矩陣 20 項全數通過（17 項初驗 + 3 項 code review 修正後補驗）
 
 ## 未通過與未驗證項目
 
 無。
+
+## 驗收後修正（code review 產出）
+
+code review 階段實測發現一項本報告初驗未覆蓋的缺陷：已安裝元件若在後續執行中被跳過，
+`--force` 會將其誤判為「上游已移除」而刪除（資料遺失）。此缺陷不在初驗矩陣範圍內
+（初驗僅涵蓋首次安裝），已修正並補 3 項驗證（見上表末三列）。修正後重跑完整驗證：
+54 項測試通過、`check_opencode.py` 通過、上表 20 項全數通過。
 
 補充說明（非缺陷）：`--skills-only` 等分項更新會建立新的 snapshot 目錄（snapshot key 含
 `kinds`），此為 bdadac8 起的既有設計，舊快照保留且未選元件仍指向原快照。已於基準版
