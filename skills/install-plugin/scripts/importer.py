@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import difflib
 import fcntl
 import hashlib
 import json
@@ -23,7 +24,7 @@ try:
 except ImportError:
     sys.exit('Missing PyYAML. Install scripts/requirements.txt in a Python virtual environment first.')
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 STATE = '.plugin-importer/manifest.json'
 MANIFESTS = ('plugin.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json', '.agy-plugin/plugin.json')
 PREFIXES = ('', '.claude', '.codex', '.opencode', '.agents')
@@ -52,9 +53,21 @@ def digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
-def valid_name(value):
+def normalize_name(value):
+    """Coerce an arbitrary label into a legal name; empty results are rejected."""
+    fixed = re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')[:64].strip('-')
+    if not fixed:
+        fail(f'Cannot derive a valid name from {value!r}; use lowercase words separated by single hyphens.')
+    return fixed
+
+
+def valid_name(value, fix=False):
     if not isinstance(value, str) or len(value) > 64 or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', value):
-        fail(f'Invalid name {value!r}; use lowercase words separated by single hyphens (max 64 characters).')
+        if not fix:
+            fail(f'Invalid name {value!r}; use lowercase words separated by single hyphens (max 64 characters).')
+        fixed = normalize_name(value)
+        warn(f'Renamed {value!r} to {fixed!r}.')
+        return fixed
     return value
 
 
@@ -188,7 +201,7 @@ def source_tree(source, ref):
         yield root, locator, git(['rev-parse', 'HEAD'], root)
 
 
-def discover(repo, fallback_name=None):
+def discover(repo, fallback_name=None, fix=False):
     candidates = {repo}
     if (repo / 'plugins').is_dir():
         candidates.update(p for p in (repo / 'plugins').iterdir() if p.is_dir())
@@ -214,14 +227,14 @@ def discover(repo, fallback_name=None):
         names = {m['name'] for m in manifests if 'name' in m}
         if len(names) > 1:
             fail(f'Conflicting plugin names in {root}')
-        name = valid_name(next(iter(names)) if names else re.sub(r'[^a-z0-9]+', '-', (fallback_name if root == repo and fallback_name else root.name).lower()).strip('-'))
+        name = valid_name(next(iter(names)) if names else re.sub(r'[^a-z0-9]+', '-', (fallback_name if root == repo and fallback_name else root.name).lower()).strip('-'), fix)
         if name in found and found[name][0].resolve() != root.resolve():
             fail(f'Duplicate plugin name: {name}')
         found[name] = (root, manifests)
     return found
 
 
-def entries(root, manifests, kind):
+def entries(root, manifests, kind, fix=False):
     paths = [root / prefix / kind for prefix in PREFIXES]
     for meta in manifests:
         custom = meta.get(kind, [])
@@ -241,14 +254,14 @@ def entries(root, manifests, kind):
                 continue
             seen.add(file.resolve())
             meta, body = markdown(file)
-            name = valid_name(meta.get('name', file.parent.name if kind == 'skills' else file.stem))
+            name = valid_name(meta.get('name', file.parent.name if kind == 'skills' else file.stem), fix)
             if name in found:
                 fail(f'Duplicate {kind} name: {name}')
             found[name] = (file.relative_to(root), meta, body)
     return found
 
 
-def mcp_entries(root, manifests):
+def mcp_entries(root, manifests, fix=False):
     sources = []
     for prefix in PREFIXES:
         for name in ('.mcp.json', 'mcp_config.json', 'opencode.json', 'opencode.jsonc'):
@@ -274,7 +287,7 @@ def mcp_entries(root, manifests):
         if not isinstance(servers, dict):
             fail('MCP servers must be a mapping.')
         for name, value in servers.items():
-            valid_name(name)
+            name = valid_name(name, fix)
             if name in result and result[name] != value:
                 if mcp_convert(result[name], root, root) != mcp_convert(value, root, root):
                     fail(f'Conflicting MCP definitions: {name}')
@@ -433,7 +446,14 @@ def agent_convert(meta):
     return result
 
 
-def build_payload(root, manifests, namespace, destination, kinds, staging):
+def build_payload(root, manifests, namespace, destination, kinds, staging, fix=False, skip=False,
+                  migration_log=None, skipped=None):
+    """Convert one plugin into OpenCode resources.
+
+    migration_log collects (export, source path) for convertible items so a later failure
+    can hand the user a manual path list. skipped collects exports this run refused to
+    convert; a skipped export is still present upstream, so an installed copy must survive.
+    """
     check_tree(root)
     fingerprint = tree_hash(root)
     key = digest(encoded([VERSION, fingerprint, namespace, str(destination), sorted(kinds)]))[:24]
@@ -454,24 +474,48 @@ def build_payload(root, manifests, namespace, destination, kinds, staging):
     for kind in ('skills', 'agents'):
         if kind not in kinds:
             continue
-        for name, (relative, meta, body) in entries(root, manifests, kind).items():
+        for name, (relative, meta, body) in entries(root, manifests, kind, fix).items():
             exported = valid_name(f'{namespace}-{name}')
             if kind == 'skills':
-                if meta.get('disable-model-invocation') or meta.get('user-invocable') is False or meta.get('allowed-tools'):
-                    fail(f'Skill {name} uses invocation/tool restrictions OpenCode cannot preserve; adapt it explicitly.')
-                meta['name'] = exported
                 export = f'skills/{exported}'
+                if meta.get('disable-model-invocation') or meta.get('user-invocable') is False or meta.get('allowed-tools'):
+                    message = f'Skill {name} uses invocation/tool restrictions OpenCode cannot preserve; adapt it explicitly.'
+                    if not skip:
+                        fail(message)
+                    warn(f'Skipping skill {name}: {message}')
+                    skipped.add(export)
+                    continue
+                meta['name'] = exported
                 linked = installed / relative.parent
             else:
-                meta = agent_convert(meta)
                 export = f'agents/{exported}.md'
+                try:
+                    meta = agent_convert(meta)
+                except ImportErrorDetail as exc:
+                    if not skip:
+                        raise
+                    warn(f'Skipping agent {name}: {exc}')
+                    skipped.add(export)
+                    continue
                 linked = installed / relative
             write_markdown(staging / relative, meta, root_tokens(body, installed))
             desired[export] = {'kind': kind, 'link': os.path.relpath(linked, (destination / export).parent)}
+            if migration_log is not None:
+                migration_log.append((export, str(root / (relative.parent if kind == 'skills' else relative))))
     if 'mcp' in kinds:
-        for name, config in mcp_entries(root, manifests).items():
+        for name, config in mcp_entries(root, manifests, fix).items():
             exported = valid_name(f'{namespace}-{name}')
-            desired[f'mcp/{exported}'] = {'kind': 'mcp', 'value': mcp_convert(config, root, installed)}
+            try:
+                value = mcp_convert(config, root, installed)
+            except ImportErrorDetail as exc:
+                if not skip:
+                    raise
+                warn(f'Skipping MCP server {name}: {exc}')
+                skipped.add(f'mcp/{exported}')
+                continue
+            desired[f'mcp/{exported}'] = {'kind': 'mcp', 'value': value}
+            if migration_log is not None:
+                migration_log.append((f'mcp/{exported}', None))
     if any((root / path).exists() for path in ('hooks', 'hooks.json', 'commands')) or any('hooks' in m for m in manifests):
         warn('Hooks and slash-command definitions are not imported; only skills, Markdown agents and MCP are supported.')
     check_tree(staging)
@@ -479,6 +523,160 @@ def build_payload(root, manifests, namespace, destination, kinds, staging):
     for item in desired.values():
         item.update(snapshot=str(snapshot), snapshot_hash=installed_hash)
     return desired, fingerprint, snapshot
+
+
+def shell_quote(value):
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def print_manual_script(desired, migration_log):
+    """Print a reviewable copy script; the caller returns without touching the destination."""
+    sources = dict(migration_log)
+    print('#!/bin/sh')
+    print('# Generated by install-plugin --manual-mode. Review before running.')
+    print('# These copy the original source files; importer frontmatter conversion')
+    print('# (renamed entries, resolved plugin-root variables) is NOT applied.')
+    print('# Prefer a normal install when you need the converted resources.')
+    print('set -eu')
+    print('DEST="${1:-$HOME/.config/opencode}"')
+    mcp_keys = []
+    for export in sorted(desired):
+        kind = desired[export]['kind']
+        if kind == 'mcp':
+            mcp_keys.append(export.split('/', 1)[1])
+            continue
+        source = sources.get(export)
+        if not source:
+            continue
+        if kind == 'skills':
+            print(f'mkdir -p "$DEST/{export}"')
+            print(f'cp -R {shell_quote(source)}/. "$DEST/{export}/"')
+        else:
+            print(f'mkdir -p "$DEST/agents"')
+            print(f'cp {shell_quote(source)} "$DEST/{export}"')
+    if mcp_keys:
+        print(f'# Merge these MCP servers into "$DEST"/opencode.jsonc under "mcp" manually:')
+        for key in mcp_keys:
+            print(f'#   {key}')
+
+
+def snapshot_changes(root, old_items):
+    """List snapshots whose contents no longer match the manifest, with their file paths.
+
+    The original source is not available here, so this is a conservative approximation:
+    every file inside a mismatching snapshot is reported, which can include files that
+    only changed mtime or mode.
+    """
+    result = []
+    seen = set()
+    for item in old_items.values():
+        snapshot = item.get('snapshot', '')
+        if not snapshot or snapshot in seen:
+            continue
+        seen.add(snapshot)
+        path = destination_path(root, snapshot)
+        if not path.is_dir():
+            continue
+        if tree_hash(path) == item.get('snapshot_hash'):
+            continue
+        files = sorted(str(p.relative_to(path)) for p in path.rglob('*')
+                       if p.is_file() and not p.is_symlink())
+        result.append((snapshot, files))
+    return sorted(result)
+
+
+def print_discard_list(changes):
+    print('Will discard local modifications in snapshot(s) (may include mtime-only changes):')
+    for snapshot, files in changes:
+        print(f'  {snapshot}')
+        for name in files:
+            print(f'    {name}')
+
+
+def save_local_patch(root, changes, staging, namespace):
+    """Write a unified diff of locally modified snapshot files against a fresh conversion."""
+    directory = Path(tempfile.mkdtemp(prefix='opencode-importer-local-'))
+    target = directory / f'{namespace}-local.patch'
+    written = []
+    for snapshot, files in changes:
+        for name in files:
+            old_path = root / snapshot / name
+            new_path = staging / name
+            if not new_path.is_file():
+                continue
+            try:
+                before = old_path.read_text().splitlines(keepends=True)
+                after = new_path.read_text().splitlines(keepends=True)
+            except (OSError, UnicodeDecodeError):
+                written.append(f'# {name}: not text, not included')
+                continue
+            diff = list(difflib.unified_diff(before, after, fromfile=f'installed/{name}',
+                                             tofile=f'source/{name}'))
+            if diff:
+                written.extend(diff)
+    target.write_text(''.join(written))
+    return target
+
+
+def validate_snapshot_record(root, snapshot):
+    """Return the safe path of a recorded snapshot, refusing malformed or linked records.
+
+    Pruning and ownership checks must agree on this: a manifest whose snapshot field is
+    damaged must stop the operation rather than let the reader guess which resource is
+    still in use.
+    """
+    if not isinstance(snapshot, str) or not snapshot.startswith('.plugin-importer/sources/'):
+        fail(f'Invalid snapshot ownership record: {snapshot!r}. '
+             'Preserve the manifest and restore the snapshot path before continuing.')
+    if '..' in Path(snapshot).parts:
+        fail(f'Invalid snapshot ownership record: {snapshot!r}.')
+    path = destination_path(root, snapshot)
+    if path.is_symlink():
+        fail(f'Modified snapshot link: {path}')
+    return path
+
+
+def prune_snapshots(root, preview=False):
+    """Delete managed snapshots that no installed item references."""
+    root = Path(root).expanduser().resolve()
+    state = state_read(root)
+    referenced = set()
+    for entry in state['plugins'].values():
+        for item in entry.get('items', {}).values():
+            snapshot = item.get('snapshot')
+            validate_snapshot_record(root, snapshot)
+            referenced.add(snapshot)
+    base = destination_path(root, '.plugin-importer/sources')
+    if not base.is_dir():
+        print('No snapshots to prune.')
+        return
+    doomed = []
+    for namespace_dir in sorted(base.iterdir()):
+        if not namespace_dir.is_dir() or namespace_dir.is_symlink():
+            continue
+        for snapshot_dir in sorted(namespace_dir.iterdir()):
+            if not snapshot_dir.is_dir() or snapshot_dir.is_symlink():
+                continue
+            relative = f'.plugin-importer/sources/{namespace_dir.name}/{snapshot_dir.name}'
+            if relative in referenced:
+                continue
+            print(f'PRUNE {relative}')
+            doomed.append(snapshot_dir)
+    if not doomed:
+        print('No unreferenced snapshots.')
+        return
+    if preview:
+        print('Dry run: no snapshot removed.')
+        return
+    for path in doomed:
+        shutil.rmtree(path)
+    for namespace_dir in sorted(base.iterdir()):
+        if namespace_dir.is_dir() and not namespace_dir.is_symlink():
+            try:
+                namespace_dir.rmdir()
+            except OSError:
+                pass
+    print(f'Removed {len(doomed)} unreferenced snapshot(s).')
 
 
 def destination_path(root, relative):
@@ -521,7 +719,33 @@ def config_read(root):
     return name, config
 
 
-def check_owned(root, export, old, config, checked):
+def print_status(root):
+    """Read-only report of installed plugins; never writes to the destination."""
+    root = Path(root).expanduser().resolve()
+    state = state_read(root)
+    if not state['plugins']:
+        print('No plugins installed.')
+        return
+    _, config = config_read(root)
+    for namespace, entry in sorted(state['plugins'].items()):
+        print(f'PLUGIN {namespace}')
+        print(f'  source: {entry.get("source")}')
+        print(f'  plugin: {entry.get("plugin")}')
+        print(f'  ref: {entry.get("ref") or "(unpinned)"}')
+        print(f'  revision: {entry.get("revision") or "(local working copy)"}')
+        items = entry.get('items', {})
+        if not items:
+            print('    (no managed items)')
+        for export, item in sorted(items.items()):
+            if item.get('kind') == 'mcp':
+                present = export[4:] in config.get('mcp', {})
+            else:
+                present = (root / export).is_symlink()
+            print(f'    {export} [{item.get("kind")}] snapshot={item.get("snapshot")} '
+                  f'present={"yes" if present else "no"}')
+
+
+def check_owned(root, export, old, config, checked, reset=False, reset_needed=None):
     if old:
         kind = old.get('kind')
         if kind not in KINDS or not export.startswith(kind + '/'):
@@ -535,7 +759,11 @@ def check_owned(root, export, old, config, checked):
             fail(f'Modified snapshot link: {path}')
         if snapshot not in checked:
             if not path.is_dir() or tree_hash(path) != old.get('snapshot_hash'):
-                fail(f'Local snapshot modified or missing: {path}. Preserve your changes before retrying.')
+                if not reset:
+                    fail(f'Local snapshot modified or missing: {path}. '
+                         'Preserve your changes, then re-run with --reset (optionally --keep-local) to discard them.')
+                if reset_needed is not None:
+                    reset_needed.add(snapshot)
             checked.add(snapshot)
     if export.startswith('mcp/'):
         key = export[4:]
@@ -549,7 +777,8 @@ def check_owned(root, export, old, config, checked):
                 fail(f'Unmanaged or locally modified export: {path}')
 
 
-def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input):
+def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input, skipped=frozenset(),
+              reset=False, reset_needed=None):
     old_plugin = state['plugins'].get(namespace, {})
     old_items = old_plugin.get('items', {})
     if not isinstance(old_items, dict):
@@ -560,9 +789,13 @@ def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input):
     changes = []
     checked = set()
     selected = set(desired) | {k for k, v in old_items.items() if v.get('kind') in kinds}
+    # A skipped export still exists upstream; an installed copy must survive this run.
+    selected -= skipped
+    for export in sorted(skipped & set(old_items)):
+        print(f'KEEP {export} (skipped this run; unsupported upstream, not removed)')
     # Validate everything first, before prompts or writes.
     for export in sorted(selected):
-        check_owned(root, export, old_items.get(export), config, checked)
+        check_owned(root, export, old_items.get(export), config, checked, reset, reset_needed)
     for export in sorted(selected):
         old = old_items.get(export)
         item = desired.get(export)
@@ -601,7 +834,16 @@ def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input):
                 servers[export[4:]] = item['value']
         else:
             changes.append((export, None if item is None else ('link', item['link'])))
+    merged = None
     if updated_config != config:
+        merged = sorted(updated_config.get('mcp', {}))
+        # Confirm the merged document is still loadable OpenCode configuration before writing it.
+        try:
+            verified = json.loads(encoded(updated_config))
+        except ValueError as exc:
+            fail(f'Merged MCP configuration is not valid JSON: {exc}')
+        if not isinstance(verified.get('mcp', {}), dict):
+            fail('Merged MCP configuration must keep an object under "mcp".')
         original = root / config_name
         if original.exists():
             content = original.read_bytes()
@@ -612,7 +854,7 @@ def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input):
             if not backup_path.exists():
                 changes.append((backup, ('bytes', content)))
         changes.append((config_name, ('bytes', encoded(updated_config))))
-    return retained, changes
+    return retained, changes, (config_name, merged) if merged is not None else None
 
 
 def apply_transaction(root, changes):
@@ -684,20 +926,29 @@ def install_lock(root, preview):
         yield
 
 
-def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', preview=False, listing=False, ask=input):
+def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', preview=False, listing=False, ask=input,
+            fix=False, skip=False, manual=False, migration_log=None, skipped=None,
+            reset=False, keep_local=False, uninstall=False):
     root = Path(root).expanduser().resolve()
+    # Caller-owned so a failure before build_payload cannot report a previous run's paths.
+    if migration_log is None:
+        migration_log = []
+    if skipped is None:
+        skipped = set()
+    if uninstall:
+        return uninstall_plugin(root, selected_plugin, namespace, kinds, mode, preview, ask, reset)
     with source_tree(source, ref) as (repo, locator, revision):
         fallback_name = Path(locator.rstrip('/')).name.removesuffix('.git')
-        plugins = discover(repo, fallback_name)
+        plugins = discover(repo, fallback_name, fix)
         if not plugins:
             fail('No supported plugin components found.')
         if listing and not selected_plugin:
             for name, (plugin_root, manifests) in sorted(plugins.items()):
                 print(f'PLUGIN {name} ({plugin_root.relative_to(repo)})')
                 for kind in ('skills', 'agents'):
-                    for entry in entries(plugin_root, manifests, kind):
+                    for entry in entries(plugin_root, manifests, kind, fix):
                         print(f'  {kind}: {entry}')
-                for entry in mcp_entries(plugin_root, manifests):
+                for entry in mcp_entries(plugin_root, manifests, fix):
                     print(f'  mcp: {entry}')
             return
         if not selected_plugin:
@@ -712,10 +963,15 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
             fail('Destination must not be inside the source plugin.')
         with tempfile.TemporaryDirectory(prefix='opencode-import-payload-') as temp:
             staging = Path(temp) / 'payload'
-            desired, fingerprint, snapshot = build_payload(plugin_root, manifests, namespace, root, kinds, staging)
+            desired, fingerprint, snapshot = build_payload(plugin_root, manifests, namespace, root, kinds,
+                                                           staging, fix=fix, skip=skip,
+                                                           migration_log=migration_log, skipped=skipped)
             if listing:
                 for key in sorted(desired):
                     print(key)
+                return
+            if manual:
+                print_manual_script(desired, migration_log)
                 return
             with install_lock(root, preview):
                 for item in desired.values():
@@ -724,11 +980,19 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
                 old = state['plugins'].get(namespace)
                 if old and (old.get('source') != locator or old.get('plugin') != selected_plugin):
                     fail('Namespace belongs to a different source. Choose another --namespace.')
-                retained, changes = make_plan(root, state, namespace, desired, kinds, mode, preview, ask)
+                reset_needed = set()
+                retained, changes, merged = make_plan(root, state, namespace, desired, kinds, mode,
+                                                       preview, ask, skipped, reset, reset_needed)
+                discard = snapshot_changes(root, old['items']) if reset_needed and old else []
+                if discard:
+                    print_discard_list(discard)
+                    if keep_local:
+                        patch = save_local_patch(root, discard, staging, namespace)
+                        print(f'Saved local modifications to {patch}')
                 entry = {'source': locator, 'plugin': selected_plugin, 'ref': ref, 'revision': revision,
                          'source_hash': fingerprint, 'items': retained}
                 # No accepted changes means no metadata writes, even when prompts were declined.
-                if not changes and retained == (old or {}).get('items', {}):
+                if not changes and retained == (old or {}).get('items', {}) and not reset_needed:
                     print('No changes.')
                     return
                 new_snapshot_needed = any(v.get('snapshot') == str(snapshot) for v in retained.values())
@@ -737,41 +1001,132 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
                     if snapshot_path.is_symlink():
                         fail('Snapshot destination is a symlink.')
                     if snapshot_path.exists():
-                        if not snapshot_path.is_dir() or tree_hash(snapshot_path) != tree_hash(staging):
+                        replacing_modified = reset and str(snapshot) in reset_needed
+                        if not snapshot_path.is_dir():
                             fail('Snapshot path is occupied by modified or unrelated content.')
-                    else:
-                        changes.insert(0, (str(snapshot), ('tree', staging)))
+                        if tree_hash(snapshot_path) != tree_hash(staging) and not replacing_modified:
+                            fail('Snapshot path is occupied by modified or unrelated content.')
+                    changes.insert(0, (str(snapshot), ('tree', staging)))
                 state['plugins'][namespace] = entry
                 changes.append((STATE, ('bytes', encoded(state))))
                 if preview:
                     print('Dry run: no destination files or manifest changed; interactive decisions not requested.')
                     return
                 apply_transaction(root, changes)
+                if merged is not None:
+                    name, servers = merged
+                    print(f'MCP servers merged into {name}: ' + (', '.join(servers) or '(none)'))
                 print(f'Installed {namespace} into {root}. Restart OpenCode to reload.')
+
+
+def uninstall_plugin(root, selected_plugin, namespace, kinds, mode, preview, ask, reset):
+    """Remove a managed plugin. Locally modified components are refused unless --reset."""
+    root = Path(root).expanduser().resolve()
+    with install_lock(root, preview):
+        state = state_read(root)
+        if namespace and namespace in state['plugins']:
+            target = namespace
+        elif selected_plugin and selected_plugin in state['plugins']:
+            target = selected_plugin
+        elif not namespace and not selected_plugin and len(state['plugins']) == 1:
+            target = next(iter(state['plugins']))
+        else:
+            installed = ', '.join(sorted(state['plugins'])) or '(none)'
+            fail(f'Plugin is not installed: {namespace or selected_plugin or "(unspecified)"}. '
+                 f'Installed: {installed}. Use --namespace or --plugin to choose one.')
+        entry = state['plugins'][target]
+        retained, changes, merged = make_plan(root, state, target, {}, kinds, 'uninstall', preview, ask,
+                                               frozenset(), reset, None)
+        if retained:
+            # A component filter left items behind; keep the record so they stay removable.
+            entry = dict(entry, items=retained)
+            state['plugins'][target] = entry
+            remaining = ', '.join(sorted(retained))
+        else:
+            state['plugins'].pop(target, None)
+        changes.append((STATE, ('bytes', encoded(state))))
+        if preview:
+            print('Dry run: no destination files or manifest changed; interactive decisions not requested.')
+            return
+        apply_transaction(root, changes)
+        if merged is not None:
+            name, servers = merged
+            print(f'MCP servers removed from {name}: ' + (', '.join(servers) or '(none)'))
+        if retained:
+            print(f'Removed selected {target} items from {root}; still managed: {remaining}. '
+                  f'Re-run --uninstall to remove the rest.')
+        else:
+            print(f'Removed {target} from {root}. Retained source snapshots; '
+                  'use --prune-snapshots to reclaim them.')
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('source', help='Local directory or Git URL')
+    parser.add_argument('source', nargs='?', help='Local directory or Git URL')
     parser.add_argument('ref', nargs='?', help='Optional branch, tag or commit SHA')
     parser.add_argument('--plugin', help='Select a plugin in a multi-plugin repository')
     parser.add_argument('--namespace', help='Override the destination name prefix')
     parser.add_argument('--config-dir', default=os.environ.get('OPENCODE_CONFIG_DIR', str(Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'opencode')))
     parser.add_argument('--list', action='store_true', help='List components without writing the destination')
     parser.add_argument('--dry-run', action='store_true', help='Validate and preview without destination writes')
+    parser.add_argument('--fix-names', action='store_true',
+                        help='Normalize invalid names to lowercase hyphenated form instead of failing')
+    parser.add_argument('--skip-unsupported', action='store_true',
+                        help='Skip components OpenCode cannot represent instead of failing')
+    parser.add_argument('--manual-mode', action='store_true',
+                        help='Print a copy script for manual migration without writing the destination')
+    parser.add_argument('--status', action='store_true',
+                        help='Show installed plugins, source and revision without a source argument')
+    parser.add_argument('--prune-snapshots', action='store_true',
+                        help='Delete managed snapshots no longer referenced by any installed item')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('-i', '--interactive', action='store_true')
     mode.add_argument('-f', '--force', action='store_true', help='Also prune intact managed components removed upstream')
+    mode.add_argument('--uninstall', action='store_true',
+                      help='Remove a managed plugin and its MCP entries without touching unmanaged files')
+    # --reset is a modifier, not a mode: it may accompany -f or --uninstall.
+    parser.add_argument('--reset', action='store_true',
+                        help='Discard local modifications inside managed snapshots (combines with -f/--uninstall)')
     for kind in sorted(KINDS):
         parser.add_argument(f'--{kind}-only', action='store_true')
+    parser.add_argument('--keep-local', action='store_true',
+                        help='With --reset, save local snapshot modifications as a patch before discarding')
     parser.add_argument('--version', action='version', version=VERSION)
     args = parser.parse_args(argv)
+    if args.keep_local and not args.reset:
+        parser.error('--keep-local requires --reset')
     kinds = {k for k in KINDS if getattr(args, k + '_only')} or KINDS
+    if args.source is None:
+        if args.status:
+            print_status(args.config_dir)
+            return 0
+        if not (args.prune_snapshots or args.uninstall):
+            parser.error('source is required unless --status, --prune-snapshots or --uninstall is given')
+        if args.uninstall:
+            args.source = args.namespace
+    migration_log = []
     try:
+        if args.prune_snapshots:
+            prune_snapshots(args.config_dir, args.dry_run)
+            return 0
         install(args.config_dir, args.source, args.ref, args.plugin, args.namespace, kinds,
-                'interactive' if args.interactive else 'force' if args.force else 'sync', args.dry_run, args.list)
+                'interactive' if args.interactive else 'force' if args.force else
+                'uninstall' if args.uninstall else 'sync',
+                args.dry_run, args.list,
+                fix=args.fix_names, skip=args.skip_unsupported, manual=args.manual_mode,
+                migration_log=migration_log, reset=args.reset, keep_local=args.keep_local,
+                uninstall=args.uninstall)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)
+        if migration_log:
+            print('Manual migration list (converted but not installed):', file=sys.stderr)
+            for export, source in migration_log:
+                if source:
+                    print(f'  {source} -> {export}', file=sys.stderr)
+                else:
+                    print(f'  {export} (MCP; merge into opencode.jsonc manually)', file=sys.stderr)
+            print('Re-run with --fix-names / --skip-unsupported, or copy these paths yourself.',
+                  file=sys.stderr)
         return 1
     return 0
 
