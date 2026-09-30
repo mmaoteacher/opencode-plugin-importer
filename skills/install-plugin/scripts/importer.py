@@ -1008,9 +1008,12 @@ def uninstall_plugin(root, selected_plugin, namespace, kinds, mode, preview, ask
             target = namespace
         elif selected_plugin and selected_plugin in state['plugins']:
             target = selected_plugin
+        elif not namespace and not selected_plugin and len(state['plugins']) == 1:
+            target = next(iter(state['plugins']))
         else:
             installed = ', '.join(sorted(state['plugins'])) or '(none)'
-            fail(f'Plugin is not installed: {namespace or selected_plugin}. Installed: {installed}')
+            fail(f'Plugin is not installed: {namespace or selected_plugin or "(unspecified)"}. '
+                 f'Installed: {installed}. Use --namespace or --plugin to choose one.')
         entry = state['plugins'][target]
         retained, changes, merged = make_plan(root, state, target, {}, kinds, 'uninstall', preview, ask,
                                                frozenset(), reset, None)

@@ -247,6 +247,44 @@ class ImporterTests(unittest.TestCase):
         self.assertTrue(patch.exists())
         self.assertIn('PRESERVE ME', patch.read_text())
 
+    def test_uninstall_removes_links_mcp_and_manifest(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'api': {'command': 'srv'}}})
+        self.agent('reviewer')
+        self.install()
+        self.install(uninstall=True)
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        self.assertFalse((self.dest / 'agents/demo-reviewer.md').exists())
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertNotIn('demo-api', config.get('mcp', {}))
+        state = im.state_read(self.dest)
+        self.assertEqual(state['plugins'], {})
+
+    def test_uninstall_refuses_when_snapshot_modified(self):
+        self.install()
+        self.touch_snapshot_file()
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Local snapshot modified or missing'):
+            self.install(uninstall=True)
+        self.assertTrue((self.dest / 'skills/demo-hello').is_symlink())
+
+    def test_uninstall_leaves_unmanaged_files(self):
+        self.install()
+        stray = self.dest / 'skills/mine.md'
+        stray.write_text('not managed by the importer')
+        self.install(uninstall=True)
+        self.assertTrue(stray.exists())
+
+    def test_uninstall_with_reset_removes_modified(self):
+        self.install()
+        self.touch_snapshot_file()
+        self.install(uninstall=True, reset=True)
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        self.assertEqual(im.state_read(self.dest)['plugins'], {})
+
+    def test_uninstall_unknown_namespace_fails(self):
+        self.install()
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Plugin is not installed'):
+            self.install(namespace='absent', uninstall=True)
+
     def test_mcp_merge_prints_server_names(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
         output = io.StringIO()
