@@ -4,7 +4,7 @@ Validated on 2026-09-21 using macOS, Python 3.9.6 and OpenCode 1.18.31.
 
 ## Automated checks
 
-**54 unit/integration tests passed** with:
+**72 unit/integration tests passed** with:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
@@ -32,6 +32,16 @@ Coverage includes:
   before any component is converted.
 - `--manual-mode` printing a copy script for skills, agents and MCP without writing.
 - The merged MCP document being valid JSON and the installed server names being reported.
+- `--status` reporting installed namespaces, source, revision and item presence without a
+  source argument and without writing anything.
+- `--reset` listing then discarding local snapshot modifications, staying opt-in, and
+  leaving a later plain import reporting `No changes.`
+- `--keep-local` writing a unified diff containing the user's edits before discarding them.
+- `--uninstall` removing symlinks, MCP entries and the manifest record while leaving
+  unmanaged files, refusing on local modifications unless `--reset` is given, and working
+  without a source argument.
+- `--prune-snapshots` removing only unreferenced snapshots, honouring dry run, and leaving
+  a later import reporting `No changes.`
 
 ## Actual OpenCode check
 

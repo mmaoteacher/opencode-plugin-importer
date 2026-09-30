@@ -97,8 +97,51 @@ entries and snapshots. Back up and resolve conflicts explicitly. `--force` means
 not permission to overwrite user changes. Interactive preview never asks questions.
 
 Component filters may be combined. Unselected components retain their previous snapshots,
-so a MCP-only update cannot silently modify installed skills. Old snapshots are retained;
-there is no automatic garbage collection in this release.
+so a MCP-only update cannot silently modify installed skills. Superseded snapshots are
+retained until you run `--prune-snapshots`; there is no automatic garbage collection.
+
+## Lifecycle
+
+Re-running the same source is idempotent (`No changes.` when nothing moved). To inspect,
+update, remove and reclaim:
+
+```bash
+# What is installed, from which source and revision, and is each item still present?
+./skills/install-plugin/scripts/install-plugin.sh --status
+
+# Update: re-run the same source/ref. Snapshots are content-addressed per run.
+./skills/install-plugin/scripts/install-plugin.sh <source>
+
+# Remove a managed plugin, its symlinks and its MCP entries (no source needed).
+./skills/install-plugin/scripts/install-plugin.sh --uninstall
+./skills/install-plugin/scripts/install-plugin.sh --uninstall --namespace my-team
+
+# Reclaim snapshots no installed item references any more.
+./skills/install-plugin/scripts/install-plugin.sh --prune-snapshots
+```
+
+`--status` and `--prune-snapshots` are read-only or destination-only, so they do not need a
+`source` argument. `--uninstall` refuses when a component was locally modified and keeps
+everything; add `--reset` only after you have decided those local changes may be discarded.
+
+### Recovering from local snapshot edits
+
+Installed resources are symlinks into `.plugin-importer/sources/`. Editing a file inside
+that snapshot makes the manifest hash disagree, and every later import stops with
+`Local snapshot modified or missing` — by design, so importer-managed content is never
+silently overwritten. Recover explicitly:
+
+```bash
+# Lists the files that will be discarded, then reinstalls from the source.
+./skills/install-plugin/scripts/install-plugin.sh <source> --reset
+
+# Same, but saves a unified diff of your local edits first and prints its path.
+./skills/install-plugin/scripts/install-plugin.sh <source> --reset --keep-local
+```
+
+The discard list is conservative: it reports every file in a mismatching snapshot, which
+can include files that only changed mtime or mode. `--keep-local` writes the patch to a
+temporary directory and prints the path; review it before deleting anything.
 
 ## Conversion and failure behavior
 

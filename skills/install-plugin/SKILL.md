@@ -37,6 +37,30 @@ Use that environment's Python for all commands below.
 - Names use `<plugin>-<component>` (single hyphens) to match OpenCode skill naming rules.
   `--namespace` chooses a different valid prefix for a collision.
 
+## Inspecting, updating and removing
+
+Re-running the same source is idempotent. Use these when the user asks about existing
+installs rather than adding new ones:
+
+- `--status` (no `source` needed) lists each installed namespace with its source, plugin,
+  ref, revision and every managed item, including whether it is still present. Use it to
+  answer "what is installed?" and to spot a namespace whose source has moved.
+- Updating is simply re-running the same source and ref; the importer reports
+  `ADD`/`UPDATE`/`KEEP` per component. A Git source records the new `revision`.
+- `--uninstall` (no `source` needed) removes a managed plugin's symlinks and its MCP
+  entries, and drops it from the manifest. It refuses and keeps everything when a component
+  was locally modified; tell the user to decide on `--reset` rather than reaching for it.
+  Add `--namespace`/`--plugin` when several plugins are installed.
+- `--prune-snapshots` (no `source` needed) deletes snapshots no installed item references.
+  Snapshots accumulate across updates, so offer this after repeated updates. `--dry-run`
+  works with it.
+
+If an import stops with `Local snapshot modified or missing`, the user edited a file inside
+a managed snapshot. The importer will not overwrite it. Report the affected snapshot and
+offer `--reset` (which lists the files it will discard first) or `--reset --keep-local`
+(which also writes a unified diff to a temporary path). Never pass `--reset` on the user's
+behalf without an explicit decision.
+
 ## Recovering from unsupported input
 
 Default behavior is strict: any component OpenCode cannot represent aborts the run. When a

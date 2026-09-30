@@ -1063,14 +1063,22 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.keep_local and not args.reset:
         parser.error('--keep-local requires --reset')
+    kinds = {k for k in KINDS if getattr(args, k + '_only')} or KINDS
     if args.source is None:
         if args.status:
             print_status(args.config_dir)
             return 0
         if args.prune_snapshots:
             return 0 if prune_snapshots(args.config_dir, args.dry_run) else 1
-        parser.error('source is required unless --status or --prune-snapshots is given')
-    kinds = {k for k in KINDS if getattr(args, k + '_only')} or KINDS
+        if args.uninstall:
+            try:
+                uninstall_plugin(Path(args.config_dir).expanduser().resolve(), args.plugin, args.namespace,
+                                 kinds, 'uninstall', args.dry_run, input, args.reset)
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                print(f'Import failed: {exc}', file=sys.stderr)
+                return 1
+            return 0
+        parser.error('source is required unless --status, --prune-snapshots or --uninstall is given')
     migration_log = []
     try:
         install(args.config_dir, args.source, args.ref, args.plugin, args.namespace, kinds,

@@ -321,6 +321,22 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertIn('No changes.', output.getvalue())
 
+    def test_uninstall_via_main_without_source(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'api': {'command': 'srv'}}})
+        self.install()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--uninstall']), 0)
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertNotIn('demo-api', config.get('mcp', {}))
+        self.assertEqual(im.state_read(self.dest)['plugins'], {})
+
+    def test_prune_snapshots_via_main_without_source(self):
+        self.install()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--prune-snapshots']), 0)
+        self.assertEqual(self.snapshot_count(), 1)
+
     def test_mcp_merge_prints_server_names(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
         output = io.StringIO()
