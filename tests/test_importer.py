@@ -111,6 +111,39 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def agent(self, name, extra=''):
+        path = self.source / 'agents' / f'{name}.md'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'---\nname: {name}\ndescription: Example agent\n{extra}---\nagent\n')
+        return path
+
+    def test_skip_unsupported_imports_remaining(self):
+        self.skill('guarded', extra='allowed-tools: [Bash]\n')
+        self.agent('aliased', 'model: sonnet\n')
+        with mock.patch.object(im, 'warn') as warned:
+            self.install(skip=True)
+        installed = sorted(p.name for p in (self.dest / 'skills').iterdir())
+        self.assertEqual(installed, ['demo-hello'])
+        self.assertFalse((self.dest / 'agents').exists())
+        messages = ' '.join(str(c) for c in warned.call_args_list)
+        self.assertIn('guarded', messages)
+        self.assertIn('aliased', messages)
+
+    def test_skip_unsupported_disabled_still_fails(self):
+        self.skill('guarded', extra='allowed-tools: [Bash]\n')
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'invocation/tool restrictions'):
+            self.install()
+        self.assertFalse(self.dest.exists())
+
+    def test_skip_unsupported_keeps_other_mcp_servers(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {
+            'broken': {'command': 'glab', 'unsupportedField': 1},
+            'working': {'command': 'glab'}}})
+        with mock.patch.object(im, 'warn'):
+            self.install(skip=True)
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertEqual(sorted(config['mcp']), ['demo-working'])
+
     def test_multiple_plugins_require_explicit_selection(self):
         nested = self.source / 'plugins/other'
         self.json(nested / 'plugin.json', {'name': 'other'})

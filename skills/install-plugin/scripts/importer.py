@@ -470,12 +470,22 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
             exported = valid_name(f'{namespace}-{name}')
             if kind == 'skills':
                 if meta.get('disable-model-invocation') or meta.get('user-invocable') is False or meta.get('allowed-tools'):
-                    fail(f'Skill {name} uses invocation/tool restrictions OpenCode cannot preserve; adapt it explicitly.')
+                    message = f'Skill {name} uses invocation/tool restrictions OpenCode cannot preserve; adapt it explicitly.'
+                    if not skip:
+                        fail(message)
+                    warn(f'Skipping skill {name}: {message}')
+                    continue
                 meta['name'] = exported
                 export = f'skills/{exported}'
                 linked = installed / relative.parent
             else:
-                meta = agent_convert(meta)
+                try:
+                    meta = agent_convert(meta)
+                except ImportErrorDetail as exc:
+                    if not skip:
+                        raise
+                    warn(f'Skipping agent {name}: {exc}')
+                    continue
                 export = f'agents/{exported}.md'
                 linked = installed / relative
             write_markdown(staging / relative, meta, root_tokens(body, installed))
@@ -483,7 +493,14 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
     if 'mcp' in kinds:
         for name, config in mcp_entries(root, manifests, fix).items():
             exported = valid_name(f'{namespace}-{name}')
-            desired[f'mcp/{exported}'] = {'kind': 'mcp', 'value': mcp_convert(config, root, installed)}
+            try:
+                value = mcp_convert(config, root, installed)
+            except ImportErrorDetail as exc:
+                if not skip:
+                    raise
+                warn(f'Skipping MCP server {name}: {exc}')
+                continue
+            desired[f'mcp/{exported}'] = {'kind': 'mcp', 'value': value}
     if any((root / path).exists() for path in ('hooks', 'hooks.json', 'commands')) or any('hooks' in m for m in manifests):
         warn('Hooks and slash-command definitions are not imported; only skills, Markdown agents and MCP are supported.')
     check_tree(staging)
@@ -776,6 +793,8 @@ def main(argv=None):
                         help='Normalize invalid names to lowercase hyphenated form instead of failing')
     parser.add_argument('--skip-unsupported', action='store_true',
                         help='Skip components OpenCode cannot represent instead of failing')
+    parser.add_argument('--manual-mode', action='store_true',
+                        help='Print a copy script for manual migration without writing the destination')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('-i', '--interactive', action='store_true')
     mode.add_argument('-f', '--force', action='store_true', help='Also prune intact managed components removed upstream')
@@ -787,7 +806,7 @@ def main(argv=None):
     try:
         install(args.config_dir, args.source, args.ref, args.plugin, args.namespace, kinds,
                 'interactive' if args.interactive else 'force' if args.force else 'sync', args.dry_run, args.list,
-                fix=args.fix_names, skip=args.skip_unsupported)
+                fix=args.fix_names, skip=args.skip_unsupported, manual=args.manual_mode)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)
         return 1
