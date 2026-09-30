@@ -135,6 +135,19 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def test_failure_prints_manual_migration_list(self):
+        # Sorted so the transferable skill is converted before the failing one aborts the run.
+        self.skill('z-guarded', extra='allowed-tools: [Bash]\n')
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status = im.main([str(self.source), '--config-dir', str(self.dest)])
+        self.assertEqual(status, 1)
+        printed = errors.getvalue()
+        self.assertIn('Manual migration list', printed)
+        self.assertIn(str(self.source / 'skills/hello'), printed)
+        self.assertIn('demo-hello', printed)
+        self.assertFalse(self.dest.exists())
+
     def test_skip_unsupported_keeps_other_mcp_servers(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {
             'broken': {'command': 'glab', 'unsupportedField': 1},

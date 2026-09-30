@@ -445,7 +445,11 @@ def agent_convert(meta):
     return result
 
 
+MIGRATION_LOG = []
+
+
 def build_payload(root, manifests, namespace, destination, kinds, staging, fix=False, skip=False):
+    MIGRATION_LOG.clear()
     check_tree(root)
     fingerprint = tree_hash(root)
     key = digest(encoded([VERSION, fingerprint, namespace, str(destination), sorted(kinds)]))[:24]
@@ -490,6 +494,7 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
                 linked = installed / relative
             write_markdown(staging / relative, meta, root_tokens(body, installed))
             desired[export] = {'kind': kind, 'link': os.path.relpath(linked, (destination / export).parent)}
+            MIGRATION_LOG.append((export, str(root / (relative.parent if kind == 'skills' else relative))))
     if 'mcp' in kinds:
         for name, config in mcp_entries(root, manifests, fix).items():
             exported = valid_name(f'{namespace}-{name}')
@@ -501,6 +506,7 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
                 warn(f'Skipping MCP server {name}: {exc}')
                 continue
             desired[f'mcp/{exported}'] = {'kind': 'mcp', 'value': value}
+            MIGRATION_LOG.append((f'mcp/{exported}', None))
     if any((root / path).exists() for path in ('hooks', 'hooks.json', 'commands')) or any('hooks' in m for m in manifests):
         warn('Hooks and slash-command definitions are not imported; only skills, Markdown agents and MCP are supported.')
     check_tree(staging)
@@ -809,6 +815,15 @@ def main(argv=None):
                 fix=args.fix_names, skip=args.skip_unsupported, manual=args.manual_mode)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)
+        if im_migration := MIGRATION_LOG:
+            print('Manual migration list (nothing was written):', file=sys.stderr)
+            for export, source in im_migration:
+                if source:
+                    print(f'  {source} -> {export}', file=sys.stderr)
+                else:
+                    print(f'  {export} (MCP; merge into opencode.jsonc manually)', file=sys.stderr)
+            print('Re-run with --fix-names / --skip-unsupported, or copy these paths yourself.',
+                  file=sys.stderr)
         return 1
     return 0
 
