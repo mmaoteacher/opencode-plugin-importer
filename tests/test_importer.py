@@ -97,6 +97,349 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def test_fix_names_normalizes_mcp_and_agent_names(self):
+        self.skill('My Skill')
+        self.json(self.source / '.mcp.json', {'mcpServers': {'GitLab': {'command': 'glab'}}})
+        self.install(fix=True)
+        self.assertTrue((self.dest / 'skills/demo-my-skill').is_symlink())
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertIn('demo-gitlab', config['mcp'])
+
+    def test_fix_names_absent_still_fails(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'GitLab': {'command': 'glab'}}})
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Invalid name'):
+            self.install()
+        self.assertFalse(self.dest.exists())
+
+    def agent(self, name, extra=''):
+        path = self.source / 'agents' / f'{name}.md'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'---\nname: {name}\ndescription: Example agent\n{extra}---\nagent\n')
+        return path
+
+    def test_skip_unsupported_imports_remaining(self):
+        self.skill('guarded', extra='allowed-tools: [Bash]\n')
+        self.agent('aliased', 'model: sonnet\n')
+        with mock.patch.object(im, 'warn') as warned:
+            self.install(skip=True)
+        installed = sorted(p.name for p in (self.dest / 'skills').iterdir())
+        self.assertEqual(installed, ['demo-hello'])
+        self.assertFalse((self.dest / 'agents').exists())
+        messages = ' '.join(str(c) for c in warned.call_args_list)
+        self.assertIn('guarded', messages)
+        self.assertIn('aliased', messages)
+
+    def test_skip_unsupported_disabled_still_fails(self):
+        self.skill('guarded', extra='allowed-tools: [Bash]\n')
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'invocation/tool restrictions'):
+            self.install()
+        self.assertFalse(self.dest.exists())
+
+    def test_skip_unsupported_force_keeps_installed_component(self):
+        self.install()
+        self.assertTrue((self.dest / 'skills/demo-hello').is_symlink())
+        # The source gains a restriction OpenCode cannot preserve.
+        self.skill('hello', extra='allowed-tools: [Bash]\n')
+        with mock.patch.object(im, 'warn'):
+            self.install(skip=True, mode='force')
+        self.assertTrue((self.dest / 'skills/demo-hello').is_symlink(),
+                        'a component skipped this run must not be pruned as removed upstream')
+        state = json.loads((self.dest / '.plugin-importer/manifest.json').read_text())
+        self.assertIn('skills/demo-hello', state['plugins']['demo']['items'])
+
+    def test_skip_unsupported_sync_reports_skip_not_removal(self):
+        self.install()
+        self.skill('hello', extra='allowed-tools: [Bash]\n')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(skip=True)
+        printed = output.getvalue()
+        self.assertIn('KEEP skills/demo-hello (skipped this run', printed)
+        self.assertNotIn('(removed upstream)', printed)
+
+    def test_migration_log_not_stale_when_failure_precedes_build(self):
+        # A first run that converts something must not leave paths for a later failing run.
+        self.skill('z-guarded', extra='allowed-tools: [Bash]\n')
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(im.main([str(self.source), '--config-dir', str(self.dest)]), 1)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            # Fails on plugin selection, before any component is converted.
+            self.assertEqual(im.main([str(self.source), '--plugin', 'absent',
+                                      '--config-dir', str(self.base / 'other config')]), 1)
+        self.assertNotIn('Manual migration list', errors.getvalue())
+
+    def test_status_lists_namespace_source_and_revision(self):
+        self.install()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--status']), 0)
+        printed = output.getvalue()
+        self.assertIn('PLUGIN demo', printed)
+        self.assertIn('source: ' + str(self.source), printed)
+        self.assertIn('revision:', printed)
+        self.assertIn('skills/demo-hello [skills]', printed)
+        self.assertIn('present=yes', printed)
+
+    def test_status_requires_no_source_and_writes_nothing(self):
+        self.install()
+        before = self.snapshot()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--status']), 0)
+        self.assertEqual(before, self.snapshot())
+
+    def test_status_without_install_reports_empty(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--status']), 0)
+        self.assertIn('No plugins installed.', output.getvalue())
+
+    def test_source_still_required_without_status(self):
+        with self.assertRaises(SystemExit):
+            im.main(['--config-dir', str(self.dest)])
+
+    def test_keep_local_requires_reset(self):
+        with self.assertRaises(SystemExit):
+            im.main([str(self.source), '--config-dir', str(self.dest), '--keep-local'])
+
+    def snapshot_dir(self, namespace='demo'):
+        state = im.state_read(self.dest)
+        return next(iter(state['plugins'][namespace]['items'].values()))['snapshot']
+
+    def touch_snapshot_file(self, body='MY LOCAL EDIT\n'):
+        path = self.dest / self.snapshot_dir() / 'skills/hello/SKILL.md'
+        path.write_text(f'---\nname: demo-hello\ndescription: local\n---\n{body}')
+        return path
+
+    def test_reset_is_opt_in(self):
+        self.install()
+        self.touch_snapshot_file()
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Local snapshot modified or missing'):
+            self.install()
+        self.assertIn('LOCAL EDIT', (self.dest / self.snapshot_dir() / 'skills/hello/SKILL.md').read_text())
+
+    def test_reset_lists_then_discards_snapshot_modification(self):
+        self.install()
+        self.touch_snapshot_file()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(reset=True)
+        printed = output.getvalue()
+        self.assertIn('Will discard local modifications in snapshot(s)', printed)
+        self.assertIn('skills/hello/SKILL.md', printed)
+        restored = (self.dest / self.snapshot_dir() / 'skills/hello/SKILL.md').read_text()
+        self.assertIn('Example skill', restored)
+        self.assertNotIn('LOCAL EDIT', restored)
+        # A further plain run must succeed now that the snapshot matches the manifest.
+        with contextlib.redirect_stdout(output):
+            self.install()
+        self.assertIn('No changes', output.getvalue())
+
+    def test_keep_local_writes_patch(self):
+        self.install()
+        self.touch_snapshot_file('PRESERVE ME\n')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(reset=True, keep_local=True)
+        printed = output.getvalue()
+        self.assertIn('Saved local modifications to', printed)
+        patch = Path(printed.split('Saved local modifications to ')[1].splitlines()[0].strip())
+        self.addCleanup(shutil.rmtree, patch.parent, True)
+        self.assertTrue(patch.exists())
+        self.assertIn('PRESERVE ME', patch.read_text())
+
+    def test_uninstall_removes_links_mcp_and_manifest(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'api': {'command': 'srv'}}})
+        self.agent('reviewer')
+        self.install()
+        self.install(uninstall=True)
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        self.assertFalse((self.dest / 'agents/demo-reviewer.md').exists())
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertNotIn('demo-api', config.get('mcp', {}))
+        state = im.state_read(self.dest)
+        self.assertEqual(state['plugins'], {})
+
+    def test_uninstall_refuses_when_snapshot_modified(self):
+        self.install()
+        self.touch_snapshot_file()
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Local snapshot modified or missing'):
+            self.install(uninstall=True)
+        self.assertTrue((self.dest / 'skills/demo-hello').is_symlink())
+
+    def test_uninstall_leaves_unmanaged_files(self):
+        self.install()
+        stray = self.dest / 'skills/mine.md'
+        stray.write_text('not managed by the importer')
+        self.install(uninstall=True)
+        self.assertTrue(stray.exists())
+
+    def test_uninstall_with_reset_removes_modified(self):
+        self.install()
+        self.touch_snapshot_file()
+        self.install(uninstall=True, reset=True)
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        self.assertEqual(im.state_read(self.dest)['plugins'], {})
+
+    def test_uninstall_unknown_namespace_fails(self):
+        self.install()
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Plugin is not installed'):
+            self.install(namespace='absent', uninstall=True)
+
+    def snapshot_count(self, namespace='demo'):
+        base = self.dest / '.plugin-importer/sources' / namespace
+        return len(list(base.iterdir())) if base.is_dir() else 0
+
+    def test_prune_snapshots_removes_only_unreferenced(self):
+        for body in ('v1\n', 'v2\n', 'v3\n'):
+            self.skill('hello', body=body)
+            self.install()
+        self.assertEqual(self.snapshot_count(), 3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            im.prune_snapshots(self.dest)
+        self.assertEqual(self.snapshot_count(), 1)
+
+    def test_prune_snapshots_dry_run_keeps_everything(self):
+        for body in ('v1\n', 'v2\n'):
+            self.skill('hello', body=body)
+            self.install()
+        before = self.snapshot_count()
+        self.assertEqual(before, 2)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            im.prune_snapshots(self.dest, preview=True)
+        self.assertIn('Dry run: no snapshot removed.', output.getvalue())
+        self.assertEqual(self.snapshot_count(), before)
+
+    def test_prune_then_rerun_reports_no_changes(self):
+        for body in ('v1\n', 'v2\n'):
+            self.skill('hello', body=body)
+            self.install()
+        with contextlib.redirect_stdout(io.StringIO()):
+            im.prune_snapshots(self.dest)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install()
+        self.assertIn('No changes.', output.getvalue())
+
+    def test_reset_combines_with_uninstall_on_cli(self):
+        self.install()
+        self.touch_snapshot_file()
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = im.main(['--config-dir', str(self.dest), '--uninstall', '--reset'])
+        self.assertEqual(status, 0)
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        self.assertEqual(im.state_read(self.dest)['plugins'], {})
+
+    def test_reset_combines_with_force_on_cli(self):
+        self.install()
+        self.touch_snapshot_file()
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = im.main([str(self.source), '--config-dir', str(self.dest), '--reset', '--force'])
+        self.assertEqual(status, 0)
+
+    def test_uninstall_via_main_without_source(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'api': {'command': 'srv'}}})
+        self.install()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--uninstall']), 0)
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertNotIn('demo-api', config.get('mcp', {}))
+        self.assertEqual(im.state_read(self.dest)['plugins'], {})
+
+    def test_prune_snapshots_via_main_without_source(self):
+        self.install()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--prune-snapshots']), 0)
+        self.assertEqual(self.snapshot_count(), 1)
+
+    def test_prune_refuses_when_snapshot_record_malformed(self):
+        self.install()
+        manifest = self.dest / '.plugin-importer/manifest.json'
+        data = json.loads(manifest.read_text())
+        data['plugins']['demo']['items']['skills/demo-hello']['snapshot'] = 'BOGUS'
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Invalid snapshot ownership record'):
+            im.prune_snapshots(self.dest)
+        # The live snapshot must survive a damaged manifest rather than be deleted as unused.
+        self.assertEqual(self.snapshot_count(), 1)
+        self.assertTrue((self.dest / 'skills/demo-hello').is_symlink())
+
+    def test_uninstall_with_filter_keeps_namespace_record(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'api': {'command': 'srv'}}})
+        self.agent('reviewer')
+        self.install()
+        self.install(uninstall=True, kinds={'skills'})
+        state = im.state_read(self.dest)
+        self.assertIn('demo', state['plugins'])
+        self.assertEqual(sorted(state['plugins']['demo']['items']),
+                         ['agents/demo-reviewer.md', 'mcp/demo-api'])
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        # A follow-up full uninstall must still be able to remove the rest.
+        self.install(uninstall=True)
+        self.assertEqual(im.state_read(self.dest)['plugins'], {})
+        self.assertFalse((self.dest / 'agents/demo-reviewer.md').exists())
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertNotIn('demo-api', config.get('mcp', {}))
+
+    def test_mcp_merge_prints_server_names(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install()
+        self.assertIn('MCP servers merged into opencode.json: demo-local', output.getvalue())
+
+    def test_mcp_merge_result_is_valid_json(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
+        self.install()
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertEqual(config['mcp']['demo-local']['type'], 'local')
+
+    def test_manual_mode_prints_script_and_skips_writes(self):
+        self.agent('reviewer')
+        self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(manual=True)
+        printed = output.getvalue()
+        self.assertIn('DEST="${1:-$HOME/.config/opencode}"', printed)
+        self.assertIn('cp -R', printed)
+        self.assertIn('skills/demo-hello', printed)
+        self.assertIn('agents/demo-reviewer.md', printed)
+        self.assertIn('#   demo-local', printed)
+        self.assertFalse(self.dest.exists())
+
+    def test_manual_mode_ignores_dry_run_prompt(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(manual=True, preview=True)
+        printed = output.getvalue()
+        self.assertIn('cp -R', printed)
+        self.assertNotIn('Dry run:', printed)
+        self.assertFalse(self.dest.exists())
+
+    def test_failure_prints_manual_migration_list(self):
+        # Sorted so the transferable skill is converted before the failing one aborts the run.
+        self.skill('z-guarded', extra='allowed-tools: [Bash]\n')
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status = im.main([str(self.source), '--config-dir', str(self.dest)])
+        self.assertEqual(status, 1)
+        printed = errors.getvalue()
+        self.assertIn('Manual migration list', printed)
+        self.assertIn(str(self.source / 'skills/hello'), printed)
+        self.assertIn('demo-hello', printed)
+        self.assertFalse(self.dest.exists())
+
+    def test_skip_unsupported_keeps_other_mcp_servers(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {
+            'broken': {'command': 'glab', 'unsupportedField': 1},
+            'working': {'command': 'glab'}}})
+        with mock.patch.object(im, 'warn'):
+            self.install(skip=True)
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertEqual(sorted(config['mcp']), ['demo-working'])
+
     def test_multiple_plugins_require_explicit_selection(self):
         nested = self.source / 'plugins/other'
         self.json(nested / 'plugin.json', {'name': 'other'})

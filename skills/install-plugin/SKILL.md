@@ -37,6 +37,56 @@ Use that environment's Python for all commands below.
 - Names use `<plugin>-<component>` (single hyphens) to match OpenCode skill naming rules.
   `--namespace` chooses a different valid prefix for a collision.
 
+## Inspecting, updating and removing
+
+Re-running the same source is idempotent. Use these when the user asks about existing
+installs rather than adding new ones:
+
+- `--status` (no `source` needed) lists each installed namespace with its source, plugin,
+  ref, revision and every managed item, including whether it is still present. Use it to
+  answer "what is installed?" and to spot a namespace whose source has moved.
+- Updating is simply re-running the same source and ref; the importer reports
+  `ADD`/`UPDATE`/`KEEP` per component. A Git source records the new `revision`.
+- `--uninstall` (no `source` needed) removes a managed plugin's symlinks and its MCP
+  entries, and drops it from the manifest. It refuses and keeps everything when a component
+  was locally modified; tell the user to decide on `--reset` rather than reaching for it.
+  Add `--namespace`/`--plugin` when several plugins are installed. With a component filter
+  (`--skills-only` and friends) only the selected kinds go; the manifest record is kept for
+  the rest so a later `--uninstall` can finish, and the output lists what is still managed.
+- `--prune-snapshots` (no `source` needed) deletes snapshots no installed item references.
+  Snapshots accumulate across updates, so offer this after repeated updates. `--dry-run`
+  works with it. If the manifest's snapshot record is damaged it stops with
+  `Invalid snapshot ownership record` and deletes nothing; report that rather than
+  suggesting `--reset`, which does not apply.
+
+If an import stops with `Local snapshot modified or missing`, the user edited a file inside
+a managed snapshot. The importer will not overwrite it. Report the affected snapshot and
+offer `--reset` (which lists the files it will discard first) or `--reset --keep-local`
+(which also writes a unified diff to a temporary path). Never pass `--reset` on the user's
+behalf without an explicit decision.
+
+## Recovering from unsupported input
+
+Default behavior is strict: any component OpenCode cannot represent aborts the run. When a
+source contains a few unsupported pieces, offer these options and let the user choose:
+
+- `--fix-names` normalizes invalid names to lowercase hyphenated form (for example an MCP
+  server named `GitLab` becomes `demo-gitlab`) and reports every rename as a warning.
+- `--skip-unsupported` skips only the components OpenCode cannot represent, warning per
+  skipped item, and installs the rest. Skipped items are not recorded as managed, so a later
+  run retries them. A component skipped by one run is **not** removed even under `--force`;
+  report it as kept-but-unsupported so the user knows it is still installed but stale.
+- `--manual-mode` prints a reviewable `sh` copy script and writes nothing. Use it when the
+  user wants to migrate by hand. The script copies original source files, so frontmatter
+  conversion is not applied; MCP servers are listed as a comment to merge by hand.
+- Without any of these options, a failure prints a manual migration list mapping each
+  converted source path to its intended destination. Nothing is written on failure.
+
+MCP servers are written into the `mcp` object of the existing `opencode.json` /
+`opencode.jsonc`; the importer never creates a separate MCP JSON file in the destination.
+The merged document is verified as loadable JSON before writing, and the installed server
+names are printed so the user can confirm the merge.
+
 If a conflict occurs, preserve the local changes and explain the conflicting path.
 Legacy `.plugin-manifest.json` ownership is not automatically migrated; use an explicitly
 chosen fresh destination or have the user back up and resolve the old installation.

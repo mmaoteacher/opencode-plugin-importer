@@ -97,8 +97,57 @@ entries and snapshots. Back up and resolve conflicts explicitly. `--force` means
 not permission to overwrite user changes. Interactive preview never asks questions.
 
 Component filters may be combined. Unselected components retain their previous snapshots,
-so a MCP-only update cannot silently modify installed skills. Old snapshots are retained;
-there is no automatic garbage collection in this release.
+so a MCP-only update cannot silently modify installed skills. Superseded snapshots are
+retained until you run `--prune-snapshots`; there is no automatic garbage collection.
+
+## Lifecycle
+
+Re-running the same source is idempotent (`No changes.` when nothing moved). To inspect,
+update, remove and reclaim:
+
+```bash
+# What is installed, from which source and revision, and is each item still present?
+./skills/install-plugin/scripts/install-plugin.sh --status
+
+# Update: re-run the same source/ref. Snapshots are content-addressed per run.
+./skills/install-plugin/scripts/install-plugin.sh <source>
+
+# Remove a managed plugin, its symlinks and its MCP entries (no source needed).
+./skills/install-plugin/scripts/install-plugin.sh --uninstall
+./skills/install-plugin/scripts/install-plugin.sh --uninstall --namespace my-team
+
+# Reclaim snapshots no installed item references any more.
+./skills/install-plugin/scripts/install-plugin.sh --prune-snapshots
+```
+
+`--status` and `--prune-snapshots` are read-only or destination-only, so they do not need a
+`source` argument. `--uninstall` refuses when a component was locally modified and keeps
+everything; add `--reset` only after you have decided those local changes may be discarded.
+
+`--uninstall` accepts the component filters. A filtered uninstall removes only the selected
+kinds and keeps the manifest record for the rest, so a later `--uninstall` can finish the
+job; it reports what is still managed. `--prune-snapshots` validates every snapshot path in
+the manifest first and stops on a malformed record rather than guessing which resource is
+still in use.
+
+### Recovering from local snapshot edits
+
+Installed resources are symlinks into `.plugin-importer/sources/`. Editing a file inside
+that snapshot makes the manifest hash disagree, and every later import stops with
+`Local snapshot modified or missing` — by design, so importer-managed content is never
+silently overwritten. Recover explicitly:
+
+```bash
+# Lists the files that will be discarded, then reinstalls from the source.
+./skills/install-plugin/scripts/install-plugin.sh <source> --reset
+
+# Same, but saves a unified diff of your local edits first and prints its path.
+./skills/install-plugin/scripts/install-plugin.sh <source> --reset --keep-local
+```
+
+The discard list is conservative: it reports every file in a mismatching snapshot, which
+can include files that only changed mtime or mode. `--keep-local` writes the patch to a
+temporary directory and prints the path; review it before deleting anything.
 
 ## Conversion and failure behavior
 
@@ -113,10 +162,24 @@ there is no automatic garbage collection in this release.
 - Unsupported restriction mappings (such as skill `allowed-tools`, restrictive invocation
   flags or agent `permissionMode`) fail before installation. Nontranslated agent metadata
   produces warnings. Review source instructions for any other host-specific behavior.
-- JSON and JSONC are accepted. MCP updates preserve unrelated configuration values, but
-  normalize formatting/comments. Original configuration bytes are saved with mode `0600`
-  in `.plugin-importer/backups/`. Having both `opencode.json` and `opencode.jsonc` is ambiguous
-  and causes an error.
+- Strict mode is the default. `--fix-names` normalizes invalid names (an MCP server named
+  `GitLab` is imported as `demo-gitlab`) and warns per rename; `--skip-unsupported` skips
+  only the components OpenCode cannot represent, warns per skipped item, and installs the
+  rest. Skipped items are not recorded as managed, so a later run retries them. A component
+  skipped by one run is **not** removed even under `--force`; it is reported as
+  `KEEP <item> (skipped this run; unsupported upstream, not removed)`. Only components
+  actually removed upstream are pruned. A strict failure prints a manual migration list
+  and writes nothing.
+- `--manual-mode` prints a reviewable `sh` copy script without writing the destination. It
+  copies original source files, so frontmatter conversion is not applied; MCP servers are
+  listed as a comment to merge by hand.
+- JSON and JSONC are accepted. MCP servers are merged into the `mcp` object of the existing
+  `opencode.json` / `opencode.jsonc`; no separate MCP JSON file is created in the
+  destination. Updates preserve unrelated configuration values, but normalize
+  formatting/comments. The merged document is verified as loadable JSON before writing and
+  the installed server names are printed. Original configuration bytes are saved with mode
+  `0600` in `.plugin-importer/backups/`. Having both `opencode.json` and `opencode.jsonc` is
+  ambiguous and causes an error.
 - Inputs and conflicts are checked before writes. Files are staged, then replaced under a
   per-destination lock. Catchable write errors and KeyboardInterrupt roll back completed
   replacements. Abrupt process termination, power failure and external concurrent edits
