@@ -46,7 +46,8 @@ source contains a few unsupported pieces, offer these options and let the user c
   server named `GitLab` becomes `demo-gitlab`) and reports every rename as a warning.
 - `--skip-unsupported` skips only the components OpenCode cannot represent, warning per
   skipped item, and installs the rest. Skipped items are not recorded as managed, so a later
-  run retries them.
+  run retries them. A component skipped by one run is **not** removed even under `--force`;
+  report it as kept-but-unsupported so the user knows it is still installed but stale.
 - `--manual-mode` prints a reviewable `sh` copy script and writes nothing. Use it when the
   user wants to migrate by hand. The script copies original source files, so frontmatter
   conversion is not applied; MCP servers are listed as a comment to merge by hand.

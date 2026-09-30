@@ -116,8 +116,11 @@ there is no automatic garbage collection in this release.
 - Strict mode is the default. `--fix-names` normalizes invalid names (an MCP server named
   `GitLab` is imported as `demo-gitlab`) and warns per rename; `--skip-unsupported` skips
   only the components OpenCode cannot represent, warns per skipped item, and installs the
-  rest. Skipped items are not recorded as managed, so a later run retries them. A strict
-  failure prints a manual migration list and writes nothing.
+  rest. Skipped items are not recorded as managed, so a later run retries them. A component
+  skipped by one run is **not** removed even under `--force`; it is reported as
+  `KEEP <item> (skipped this run; unsupported upstream, not removed)`. Only components
+  actually removed upstream are pruned. A strict failure prints a manual migration list
+  and writes nothing.
 - `--manual-mode` prints a reviewable `sh` copy script without writing the destination. It
   copies original source files, so frontmatter conversion is not applied; MCP servers are
   listed as a comment to merge by hand.
