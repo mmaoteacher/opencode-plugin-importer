@@ -135,6 +135,29 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def test_manual_mode_prints_script_and_skips_writes(self):
+        self.agent('reviewer')
+        self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(manual=True)
+        printed = output.getvalue()
+        self.assertIn('DEST="${1:-$HOME/.config/opencode}"', printed)
+        self.assertIn('cp -R', printed)
+        self.assertIn('skills/demo-hello', printed)
+        self.assertIn('agents/demo-reviewer.md', printed)
+        self.assertIn('#   demo-local', printed)
+        self.assertFalse(self.dest.exists())
+
+    def test_manual_mode_ignores_dry_run_prompt(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(manual=True, preview=True)
+        printed = output.getvalue()
+        self.assertIn('cp -R', printed)
+        self.assertNotIn('Dry run:', printed)
+        self.assertFalse(self.dest.exists())
+
     def test_failure_prints_manual_migration_list(self):
         # Sorted so the transferable skill is converted before the failing one aborts the run.
         self.skill('z-guarded', extra='allowed-tools: [Bash]\n')
