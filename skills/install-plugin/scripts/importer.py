@@ -599,7 +599,6 @@ def save_local_patch(root, changes, staging, namespace):
     target = directory / f'{namespace}-local.patch'
     written = []
     for snapshot, files in changes:
-        fresh = root / snapshot
         for name in files:
             old_path = root / snapshot / name
             new_path = staging / name
@@ -619,16 +618,38 @@ def save_local_patch(root, changes, staging, namespace):
     return target
 
 
+def validate_snapshot_record(root, snapshot):
+    """Return the safe path of a recorded snapshot, refusing malformed or linked records.
+
+    Pruning and ownership checks must agree on this: a manifest whose snapshot field is
+    damaged must stop the operation rather than let the reader guess which resource is
+    still in use.
+    """
+    if not isinstance(snapshot, str) or not snapshot.startswith('.plugin-importer/sources/'):
+        fail(f'Invalid snapshot ownership record: {snapshot!r}. '
+             'Preserve the manifest and restore the snapshot path before continuing.')
+    if '..' in Path(snapshot).parts:
+        fail(f'Invalid snapshot ownership record: {snapshot!r}.')
+    path = destination_path(root, snapshot)
+    if path.is_symlink():
+        fail(f'Modified snapshot link: {path}')
+    return path
+
+
 def prune_snapshots(root, preview=False):
-    """Delete managed snapshots that no installed item references. Returns success."""
+    """Delete managed snapshots that no installed item references."""
     root = Path(root).expanduser().resolve()
     state = state_read(root)
-    referenced = {item.get('snapshot') for entry in state['plugins'].values()
-                  for item in entry.get('items', {}).values()}
+    referenced = set()
+    for entry in state['plugins'].values():
+        for item in entry.get('items', {}).values():
+            snapshot = item.get('snapshot')
+            validate_snapshot_record(root, snapshot)
+            referenced.add(snapshot)
     base = destination_path(root, '.plugin-importer/sources')
     if not base.is_dir():
         print('No snapshots to prune.')
-        return True
+        return
     doomed = []
     for namespace_dir in sorted(base.iterdir()):
         if not namespace_dir.is_dir() or namespace_dir.is_symlink():
@@ -643,10 +664,10 @@ def prune_snapshots(root, preview=False):
             doomed.append(snapshot_dir)
     if not doomed:
         print('No unreferenced snapshots.')
-        return True
+        return
     if preview:
         print('Dry run: no snapshot removed.')
-        return True
+        return
     for path in doomed:
         shutil.rmtree(path)
     for namespace_dir in sorted(base.iterdir()):
@@ -656,7 +677,6 @@ def prune_snapshots(root, preview=False):
             except OSError:
                 pass
     print(f'Removed {len(doomed)} unreferenced snapshot(s).')
-    return True
 
 
 def destination_path(root, relative):
@@ -1017,7 +1037,13 @@ def uninstall_plugin(root, selected_plugin, namespace, kinds, mode, preview, ask
         entry = state['plugins'][target]
         retained, changes, merged = make_plan(root, state, target, {}, kinds, 'uninstall', preview, ask,
                                                frozenset(), reset, None)
-        state['plugins'].pop(target, None)
+        if retained:
+            # A component filter left items behind; keep the record so they stay removable.
+            entry = dict(entry, items=retained)
+            state['plugins'][target] = entry
+            remaining = ', '.join(sorted(retained))
+        else:
+            state['plugins'].pop(target, None)
         changes.append((STATE, ('bytes', encoded(state))))
         if preview:
             print('Dry run: no destination files or manifest changed; interactive decisions not requested.')
@@ -1026,7 +1052,12 @@ def uninstall_plugin(root, selected_plugin, namespace, kinds, mode, preview, ask
         if merged is not None:
             name, servers = merged
             print(f'MCP servers removed from {name}: ' + (', '.join(servers) or '(none)'))
-        print(f'Removed {target} from {root}. Retained source snapshots; use --prune-snapshots to reclaim them.')
+        if retained:
+            print(f'Removed selected {target} items from {root}; still managed: {remaining}. '
+                  f'Re-run --uninstall to remove the rest.')
+        else:
+            print(f'Removed {target} from {root}. Retained source snapshots; '
+                  'use --prune-snapshots to reclaim them.')
 
 
 def main(argv=None):
@@ -1069,19 +1100,15 @@ def main(argv=None):
         if args.status:
             print_status(args.config_dir)
             return 0
-        if args.prune_snapshots:
-            return 0 if prune_snapshots(args.config_dir, args.dry_run) else 1
+        if not (args.prune_snapshots or args.uninstall):
+            parser.error('source is required unless --status, --prune-snapshots or --uninstall is given')
         if args.uninstall:
-            try:
-                uninstall_plugin(Path(args.config_dir).expanduser().resolve(), args.plugin, args.namespace,
-                                 kinds, 'uninstall', args.dry_run, input, args.reset)
-            except (ValueError, OSError, KeyError, TypeError) as exc:
-                print(f'Import failed: {exc}', file=sys.stderr)
-                return 1
-            return 0
-        parser.error('source is required unless --status, --prune-snapshots or --uninstall is given')
+            args.source = args.namespace
     migration_log = []
     try:
+        if args.prune_snapshots:
+            prune_snapshots(args.config_dir, args.dry_run)
+            return 0
         install(args.config_dir, args.source, args.ref, args.plugin, args.namespace, kinds,
                 'interactive' if args.interactive else 'force' if args.force else
                 'uninstall' if args.uninstall else 'sync',

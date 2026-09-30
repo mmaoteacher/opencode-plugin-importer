@@ -353,6 +353,35 @@ class ImporterTests(unittest.TestCase):
             self.assertEqual(im.main(['--config-dir', str(self.dest), '--prune-snapshots']), 0)
         self.assertEqual(self.snapshot_count(), 1)
 
+    def test_prune_refuses_when_snapshot_record_malformed(self):
+        self.install()
+        manifest = self.dest / '.plugin-importer/manifest.json'
+        data = json.loads(manifest.read_text())
+        data['plugins']['demo']['items']['skills/demo-hello']['snapshot'] = 'BOGUS'
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Invalid snapshot ownership record'):
+            im.prune_snapshots(self.dest)
+        # The live snapshot must survive a damaged manifest rather than be deleted as unused.
+        self.assertEqual(self.snapshot_count(), 1)
+        self.assertTrue((self.dest / 'skills/demo-hello').is_symlink())
+
+    def test_uninstall_with_filter_keeps_namespace_record(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'api': {'command': 'srv'}}})
+        self.agent('reviewer')
+        self.install()
+        self.install(uninstall=True, kinds={'skills'})
+        state = im.state_read(self.dest)
+        self.assertIn('demo', state['plugins'])
+        self.assertEqual(sorted(state['plugins']['demo']['items']),
+                         ['agents/demo-reviewer.md', 'mcp/demo-api'])
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        # A follow-up full uninstall must still be able to remove the rest.
+        self.install(uninstall=True)
+        self.assertEqual(im.state_read(self.dest)['plugins'], {})
+        self.assertFalse((self.dest / 'agents/demo-reviewer.md').exists())
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertNotIn('demo-api', config.get('mcp', {}))
+
     def test_mcp_merge_prints_server_names(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
         output = io.StringIO()
