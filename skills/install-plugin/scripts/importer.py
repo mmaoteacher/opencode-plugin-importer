@@ -1053,8 +1053,9 @@ def main(argv=None):
     mode.add_argument('-f', '--force', action='store_true', help='Also prune intact managed components removed upstream')
     mode.add_argument('--uninstall', action='store_true',
                       help='Remove a managed plugin and its MCP entries without touching unmanaged files')
-    mode.add_argument('--reset', action='store_true',
-                      help='Discard local modifications inside managed snapshots and reinstall')
+    # --reset is a modifier, not a mode: it may accompany -f or --uninstall.
+    parser.add_argument('--reset', action='store_true',
+                        help='Discard local modifications inside managed snapshots (combines with -f/--uninstall)')
     for kind in sorted(KINDS):
         parser.add_argument(f'--{kind}-only', action='store_true')
     parser.add_argument('--keep-local', action='store_true',

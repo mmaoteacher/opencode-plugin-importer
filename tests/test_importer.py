@@ -321,6 +321,22 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertIn('No changes.', output.getvalue())
 
+    def test_reset_combines_with_uninstall_on_cli(self):
+        self.install()
+        self.touch_snapshot_file()
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = im.main(['--config-dir', str(self.dest), '--uninstall', '--reset'])
+        self.assertEqual(status, 0)
+        self.assertFalse((self.dest / 'skills/demo-hello').exists())
+        self.assertEqual(im.state_read(self.dest)['plugins'], {})
+
+    def test_reset_combines_with_force_on_cli(self):
+        self.install()
+        self.touch_snapshot_file()
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = im.main([str(self.source), '--config-dir', str(self.dest), '--reset', '--force'])
+        self.assertEqual(status, 0)
+
     def test_uninstall_via_main_without_source(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {'api': {'command': 'srv'}}})
         self.install()
