@@ -113,10 +113,21 @@ there is no automatic garbage collection in this release.
 - Unsupported restriction mappings (such as skill `allowed-tools`, restrictive invocation
   flags or agent `permissionMode`) fail before installation. Nontranslated agent metadata
   produces warnings. Review source instructions for any other host-specific behavior.
-- JSON and JSONC are accepted. MCP updates preserve unrelated configuration values, but
-  normalize formatting/comments. Original configuration bytes are saved with mode `0600`
-  in `.plugin-importer/backups/`. Having both `opencode.json` and `opencode.jsonc` is ambiguous
-  and causes an error.
+- Strict mode is the default. `--fix-names` normalizes invalid names (an MCP server named
+  `GitLab` is imported as `demo-gitlab`) and warns per rename; `--skip-unsupported` skips
+  only the components OpenCode cannot represent, warns per skipped item, and installs the
+  rest. Skipped items are not recorded as managed, so a later run retries them. A strict
+  failure prints a manual migration list and writes nothing.
+- `--manual-mode` prints a reviewable `sh` copy script without writing the destination. It
+  copies original source files, so frontmatter conversion is not applied; MCP servers are
+  listed as a comment to merge by hand.
+- JSON and JSONC are accepted. MCP servers are merged into the `mcp` object of the existing
+  `opencode.json` / `opencode.jsonc`; no separate MCP JSON file is created in the
+  destination. Updates preserve unrelated configuration values, but normalize
+  formatting/comments. The merged document is verified as loadable JSON before writing and
+  the installed server names are printed. Original configuration bytes are saved with mode
+  `0600` in `.plugin-importer/backups/`. Having both `opencode.json` and `opencode.jsonc` is
+  ambiguous and causes an error.
 - Inputs and conflicts are checked before writes. Files are staged, then replaced under a
   per-destination lock. Catchable write errors and KeyboardInterrupt roll back completed
   replacements. Abrupt process termination, power failure and external concurrent edits

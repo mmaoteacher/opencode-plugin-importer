@@ -135,6 +135,19 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def test_mcp_merge_prints_server_names(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install()
+        self.assertIn('MCP servers merged into opencode.json: demo-local', output.getvalue())
+
+    def test_mcp_merge_result_is_valid_json(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
+        self.install()
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertEqual(config['mcp']['demo-local']['type'], 'local')
+
     def test_manual_mode_prints_script_and_skips_writes(self):
         self.agent('reviewer')
         self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})

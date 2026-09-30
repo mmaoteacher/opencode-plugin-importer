@@ -671,7 +671,16 @@ def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input):
                 servers[export[4:]] = item['value']
         else:
             changes.append((export, None if item is None else ('link', item['link'])))
+    merged = None
     if updated_config != config:
+        merged = sorted(updated_config.get('mcp', {}))
+        # Confirm the merged document is still loadable OpenCode configuration before writing it.
+        try:
+            verified = json.loads(encoded(updated_config))
+        except ValueError as exc:
+            fail(f'Merged MCP configuration is not valid JSON: {exc}')
+        if not isinstance(verified.get('mcp', {}), dict):
+            fail('Merged MCP configuration must keep an object under "mcp".')
         original = root / config_name
         if original.exists():
             content = original.read_bytes()
@@ -682,7 +691,7 @@ def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input):
             if not backup_path.exists():
                 changes.append((backup, ('bytes', content)))
         changes.append((config_name, ('bytes', encoded(updated_config))))
-    return retained, changes
+    return retained, changes, (config_name, merged) if merged is not None else None
 
 
 def apply_transaction(root, changes):
@@ -798,7 +807,7 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
                 old = state['plugins'].get(namespace)
                 if old and (old.get('source') != locator or old.get('plugin') != selected_plugin):
                     fail('Namespace belongs to a different source. Choose another --namespace.')
-                retained, changes = make_plan(root, state, namespace, desired, kinds, mode, preview, ask)
+                retained, changes, merged = make_plan(root, state, namespace, desired, kinds, mode, preview, ask)
                 entry = {'source': locator, 'plugin': selected_plugin, 'ref': ref, 'revision': revision,
                          'source_hash': fingerprint, 'items': retained}
                 # No accepted changes means no metadata writes, even when prompts were declined.
@@ -821,6 +830,9 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
                     print('Dry run: no destination files or manifest changed; interactive decisions not requested.')
                     return
                 apply_transaction(root, changes)
+                if merged is not None:
+                    name, servers = merged
+                    print(f'MCP servers merged into {name}: ' + (', '.join(servers) or '(none)'))
                 print(f'Installed {namespace} into {root}. Restart OpenCode to reload.')
 
 

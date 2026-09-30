@@ -37,6 +37,27 @@ Use that environment's Python for all commands below.
 - Names use `<plugin>-<component>` (single hyphens) to match OpenCode skill naming rules.
   `--namespace` chooses a different valid prefix for a collision.
 
+## Recovering from unsupported input
+
+Default behavior is strict: any component OpenCode cannot represent aborts the run. When a
+source contains a few unsupported pieces, offer these options and let the user choose:
+
+- `--fix-names` normalizes invalid names to lowercase hyphenated form (for example an MCP
+  server named `GitLab` becomes `demo-gitlab`) and reports every rename as a warning.
+- `--skip-unsupported` skips only the components OpenCode cannot represent, warning per
+  skipped item, and installs the rest. Skipped items are not recorded as managed, so a later
+  run retries them.
+- `--manual-mode` prints a reviewable `sh` copy script and writes nothing. Use it when the
+  user wants to migrate by hand. The script copies original source files, so frontmatter
+  conversion is not applied; MCP servers are listed as a comment to merge by hand.
+- Without any of these options, a failure prints a manual migration list mapping each
+  converted source path to its intended destination. Nothing is written on failure.
+
+MCP servers are written into the `mcp` object of the existing `opencode.json` /
+`opencode.jsonc`; the importer never creates a separate MCP JSON file in the destination.
+The merged document is verified as loadable JSON before writing, and the installed server
+names are printed so the user can confirm the merge.
+
 If a conflict occurs, preserve the local changes and explain the conflicting path.
 Legacy `.plugin-manifest.json` ownership is not automatically migrated; use an explicitly
 chosen fresh destination or have the user back up and resolve the old installation.

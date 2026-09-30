@@ -4,7 +4,7 @@ Validated on 2026-09-21 using macOS, Python 3.9.6 and OpenCode 1.18.31.
 
 ## Automated checks
 
-**41 unit/integration tests passed** with:
+**51 unit/integration tests passed** with:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
@@ -22,6 +22,12 @@ Coverage includes:
 - External/nested symlink rejection and rebased internal file links.
 - Simulated write failures after partial installation, restoring the original destination.
 - Original JSONC backups and exclusion of development dependency directories.
+- `--fix-names` renaming invalid skill and MCP names, and strict failure without it.
+- `--skip-unsupported` skipping restricted skills, aliased agents and invalid MCP entries
+  while keeping the convertible ones, and strict failure without it.
+- The manual migration list printed on failure, with no destination files created.
+- `--manual-mode` printing a copy script for skills, agents and MCP without writing.
+- The merged MCP document being valid JSON and the installed server names being reported.
 
 ## Actual OpenCode check
 
