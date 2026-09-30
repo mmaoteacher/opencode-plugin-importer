@@ -24,7 +24,7 @@ try:
 except ImportError:
     sys.exit('Missing PyYAML. Install scripts/requirements.txt in a Python virtual environment first.')
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 STATE = '.plugin-importer/manifest.json'
 MANIFESTS = ('plugin.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json', '.agy-plugin/plugin.json')
 PREFIXES = ('', '.claude', '.codex', '.opencode', '.agents')
