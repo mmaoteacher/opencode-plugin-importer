@@ -201,6 +201,52 @@ class ImporterTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             im.main([str(self.source), '--config-dir', str(self.dest), '--keep-local'])
 
+    def snapshot_dir(self, namespace='demo'):
+        state = im.state_read(self.dest)
+        return next(iter(state['plugins'][namespace]['items'].values()))['snapshot']
+
+    def touch_snapshot_file(self, body='MY LOCAL EDIT\n'):
+        path = self.dest / self.snapshot_dir() / 'skills/hello/SKILL.md'
+        path.write_text(f'---\nname: demo-hello\ndescription: local\n---\n{body}')
+        return path
+
+    def test_reset_is_opt_in(self):
+        self.install()
+        self.touch_snapshot_file()
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Local snapshot modified or missing'):
+            self.install()
+        self.assertIn('LOCAL EDIT', (self.dest / self.snapshot_dir() / 'skills/hello/SKILL.md').read_text())
+
+    def test_reset_lists_then_discards_snapshot_modification(self):
+        self.install()
+        self.touch_snapshot_file()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(reset=True)
+        printed = output.getvalue()
+        self.assertIn('Will discard local modifications in snapshot(s)', printed)
+        self.assertIn('skills/hello/SKILL.md', printed)
+        restored = (self.dest / self.snapshot_dir() / 'skills/hello/SKILL.md').read_text()
+        self.assertIn('Example skill', restored)
+        self.assertNotIn('LOCAL EDIT', restored)
+        # A further plain run must succeed now that the snapshot matches the manifest.
+        with contextlib.redirect_stdout(output):
+            self.install()
+        self.assertIn('No changes', output.getvalue())
+
+    def test_keep_local_writes_patch(self):
+        self.install()
+        self.touch_snapshot_file('PRESERVE ME\n')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(reset=True, keep_local=True)
+        printed = output.getvalue()
+        self.assertIn('Saved local modifications to', printed)
+        patch = Path(printed.split('Saved local modifications to ')[1].splitlines()[0].strip())
+        self.addCleanup(shutil.rmtree, patch.parent, True)
+        self.assertTrue(patch.exists())
+        self.assertIn('PRESERVE ME', patch.read_text())
+
     def test_mcp_merge_prints_server_names(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
         output = io.StringIO()

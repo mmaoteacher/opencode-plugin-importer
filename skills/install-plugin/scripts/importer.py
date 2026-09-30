@@ -725,7 +725,7 @@ def print_status(root):
                   f'present={"yes" if present else "no"}')
 
 
-def check_owned(root, export, old, config, checked):
+def check_owned(root, export, old, config, checked, reset=False, reset_needed=None):
     if old:
         kind = old.get('kind')
         if kind not in KINDS or not export.startswith(kind + '/'):
@@ -739,7 +739,11 @@ def check_owned(root, export, old, config, checked):
             fail(f'Modified snapshot link: {path}')
         if snapshot not in checked:
             if not path.is_dir() or tree_hash(path) != old.get('snapshot_hash'):
-                fail(f'Local snapshot modified or missing: {path}. Preserve your changes before retrying.')
+                if not reset:
+                    fail(f'Local snapshot modified or missing: {path}. '
+                         'Preserve your changes, then re-run with --reset (optionally --keep-local) to discard them.')
+                if reset_needed is not None:
+                    reset_needed.add(snapshot)
             checked.add(snapshot)
     if export.startswith('mcp/'):
         key = export[4:]
@@ -753,7 +757,8 @@ def check_owned(root, export, old, config, checked):
                 fail(f'Unmanaged or locally modified export: {path}')
 
 
-def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input, skipped=frozenset()):
+def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input, skipped=frozenset(),
+              reset=False, reset_needed=None):
     old_plugin = state['plugins'].get(namespace, {})
     old_items = old_plugin.get('items', {})
     if not isinstance(old_items, dict):
@@ -770,7 +775,7 @@ def make_plan(root, state, namespace, desired, kinds, mode, preview, ask=input, 
         print(f'KEEP {export} (skipped this run; unsupported upstream, not removed)')
     # Validate everything first, before prompts or writes.
     for export in sorted(selected):
-        check_owned(root, export, old_items.get(export), config, checked)
+        check_owned(root, export, old_items.get(export), config, checked, reset, reset_needed)
     for export in sorted(selected):
         old = old_items.get(export)
         item = desired.get(export)
@@ -902,13 +907,16 @@ def install_lock(root, preview):
 
 
 def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', preview=False, listing=False, ask=input,
-            fix=False, skip=False, manual=False, migration_log=None, skipped=None):
+            fix=False, skip=False, manual=False, migration_log=None, skipped=None,
+            reset=False, keep_local=False, uninstall=False):
     root = Path(root).expanduser().resolve()
     # Caller-owned so a failure before build_payload cannot report a previous run's paths.
     if migration_log is None:
         migration_log = []
     if skipped is None:
         skipped = set()
+    if uninstall:
+        return uninstall_plugin(root, selected_plugin, namespace, kinds, mode, preview, ask, reset)
     with source_tree(source, ref) as (repo, locator, revision):
         fallback_name = Path(locator.rstrip('/')).name.removesuffix('.git')
         plugins = discover(repo, fallback_name, fix)
@@ -952,12 +960,19 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
                 old = state['plugins'].get(namespace)
                 if old and (old.get('source') != locator or old.get('plugin') != selected_plugin):
                     fail('Namespace belongs to a different source. Choose another --namespace.')
+                reset_needed = set()
                 retained, changes, merged = make_plan(root, state, namespace, desired, kinds, mode,
-                                                       preview, ask, skipped)
+                                                       preview, ask, skipped, reset, reset_needed)
+                discard = snapshot_changes(root, old['items']) if reset_needed and old else []
+                if discard:
+                    print_discard_list(discard)
+                    if keep_local:
+                        patch = save_local_patch(root, discard, staging, namespace)
+                        print(f'Saved local modifications to {patch}')
                 entry = {'source': locator, 'plugin': selected_plugin, 'ref': ref, 'revision': revision,
                          'source_hash': fingerprint, 'items': retained}
                 # No accepted changes means no metadata writes, even when prompts were declined.
-                if not changes and retained == (old or {}).get('items', {}):
+                if not changes and retained == (old or {}).get('items', {}) and not reset_needed:
                     print('No changes.')
                     return
                 new_snapshot_needed = any(v.get('snapshot') == str(snapshot) for v in retained.values())
@@ -966,10 +981,12 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
                     if snapshot_path.is_symlink():
                         fail('Snapshot destination is a symlink.')
                     if snapshot_path.exists():
-                        if not snapshot_path.is_dir() or tree_hash(snapshot_path) != tree_hash(staging):
+                        replacing_modified = reset and str(snapshot) in reset_needed
+                        if not snapshot_path.is_dir():
                             fail('Snapshot path is occupied by modified or unrelated content.')
-                    else:
-                        changes.insert(0, (str(snapshot), ('tree', staging)))
+                        if tree_hash(snapshot_path) != tree_hash(staging) and not replacing_modified:
+                            fail('Snapshot path is occupied by modified or unrelated content.')
+                    changes.insert(0, (str(snapshot), ('tree', staging)))
                 state['plugins'][namespace] = entry
                 changes.append((STATE, ('bytes', encoded(state))))
                 if preview:
@@ -980,6 +997,33 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
                     name, servers = merged
                     print(f'MCP servers merged into {name}: ' + (', '.join(servers) or '(none)'))
                 print(f'Installed {namespace} into {root}. Restart OpenCode to reload.')
+
+
+def uninstall_plugin(root, selected_plugin, namespace, kinds, mode, preview, ask, reset):
+    """Remove a managed plugin. Locally modified components are refused unless --reset."""
+    root = Path(root).expanduser().resolve()
+    with install_lock(root, preview):
+        state = state_read(root)
+        if namespace and namespace in state['plugins']:
+            target = namespace
+        elif selected_plugin and selected_plugin in state['plugins']:
+            target = selected_plugin
+        else:
+            installed = ', '.join(sorted(state['plugins'])) or '(none)'
+            fail(f'Plugin is not installed: {namespace or selected_plugin}. Installed: {installed}')
+        entry = state['plugins'][target]
+        retained, changes, merged = make_plan(root, state, target, {}, kinds, 'uninstall', preview, ask,
+                                               frozenset(), reset, None)
+        state['plugins'].pop(target, None)
+        changes.append((STATE, ('bytes', encoded(state))))
+        if preview:
+            print('Dry run: no destination files or manifest changed; interactive decisions not requested.')
+            return
+        apply_transaction(root, changes)
+        if merged is not None:
+            name, servers = merged
+            print(f'MCP servers removed from {name}: ' + (', '.join(servers) or '(none)'))
+        print(f'Removed {target} from {root}. Retained source snapshots; use --prune-snapshots to reclaim them.')
 
 
 def main(argv=None):
@@ -1027,9 +1071,12 @@ def main(argv=None):
     migration_log = []
     try:
         install(args.config_dir, args.source, args.ref, args.plugin, args.namespace, kinds,
-                'interactive' if args.interactive else 'force' if args.force else 'sync', args.dry_run, args.list,
+                'interactive' if args.interactive else 'force' if args.force else
+                'uninstall' if args.uninstall else 'sync',
+                args.dry_run, args.list,
                 fix=args.fix_names, skip=args.skip_unsupported, manual=args.manual_mode,
-                migration_log=migration_log)
+                migration_log=migration_log, reset=args.reset, keep_local=args.keep_local,
+                uninstall=args.uninstall)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)
         if migration_log:
