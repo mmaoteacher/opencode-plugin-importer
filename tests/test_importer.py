@@ -169,6 +169,38 @@ class ImporterTests(unittest.TestCase):
                                       '--config-dir', str(self.base / 'other config')]), 1)
         self.assertNotIn('Manual migration list', errors.getvalue())
 
+    def test_status_lists_namespace_source_and_revision(self):
+        self.install()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--status']), 0)
+        printed = output.getvalue()
+        self.assertIn('PLUGIN demo', printed)
+        self.assertIn('source: ' + str(self.source), printed)
+        self.assertIn('revision:', printed)
+        self.assertIn('skills/demo-hello [skills]', printed)
+        self.assertIn('present=yes', printed)
+
+    def test_status_requires_no_source_and_writes_nothing(self):
+        self.install()
+        before = self.snapshot()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--status']), 0)
+        self.assertEqual(before, self.snapshot())
+
+    def test_status_without_install_reports_empty(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(im.main(['--config-dir', str(self.dest), '--status']), 0)
+        self.assertIn('No plugins installed.', output.getvalue())
+
+    def test_source_still_required_without_status(self):
+        with self.assertRaises(SystemExit):
+            im.main(['--config-dir', str(self.dest)])
+
+    def test_keep_local_requires_reset(self):
+        with self.assertRaises(SystemExit):
+            im.main([str(self.source), '--config-dir', str(self.dest), '--keep-local'])
+
     def test_mcp_merge_prints_server_names(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
         output = io.StringIO()

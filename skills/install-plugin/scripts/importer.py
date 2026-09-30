@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import difflib
 import fcntl
 import hashlib
 import json
@@ -559,6 +560,105 @@ def print_manual_script(desired, migration_log):
             print(f'#   {key}')
 
 
+def snapshot_changes(root, old_items):
+    """List snapshots whose contents no longer match the manifest, with their file paths.
+
+    The original source is not available here, so this is a conservative approximation:
+    every file inside a mismatching snapshot is reported, which can include files that
+    only changed mtime or mode.
+    """
+    result = []
+    seen = set()
+    for item in old_items.values():
+        snapshot = item.get('snapshot', '')
+        if not snapshot or snapshot in seen:
+            continue
+        seen.add(snapshot)
+        path = destination_path(root, snapshot)
+        if not path.is_dir():
+            continue
+        if tree_hash(path) == item.get('snapshot_hash'):
+            continue
+        files = sorted(str(p.relative_to(path)) for p in path.rglob('*')
+                       if p.is_file() and not p.is_symlink())
+        result.append((snapshot, files))
+    return sorted(result)
+
+
+def print_discard_list(changes):
+    print('Will discard local modifications in snapshot(s) (may include mtime-only changes):')
+    for snapshot, files in changes:
+        print(f'  {snapshot}')
+        for name in files:
+            print(f'    {name}')
+
+
+def save_local_patch(root, changes, staging, namespace):
+    """Write a unified diff of locally modified snapshot files against a fresh conversion."""
+    directory = Path(tempfile.mkdtemp(prefix='opencode-importer-local-'))
+    target = directory / f'{namespace}-local.patch'
+    written = []
+    for snapshot, files in changes:
+        fresh = root / snapshot
+        for name in files:
+            old_path = root / snapshot / name
+            new_path = staging / name
+            if not new_path.is_file():
+                continue
+            try:
+                before = old_path.read_text().splitlines(keepends=True)
+                after = new_path.read_text().splitlines(keepends=True)
+            except (OSError, UnicodeDecodeError):
+                written.append(f'# {name}: not text, not included')
+                continue
+            diff = list(difflib.unified_diff(before, after, fromfile=f'installed/{name}',
+                                             tofile=f'source/{name}'))
+            if diff:
+                written.extend(diff)
+    target.write_text(''.join(written))
+    return target
+
+
+def prune_snapshots(root, preview=False):
+    """Delete managed snapshots that no installed item references. Returns success."""
+    root = Path(root).expanduser().resolve()
+    state = state_read(root)
+    referenced = {item.get('snapshot') for entry in state['plugins'].values()
+                  for item in entry.get('items', {}).values()}
+    base = destination_path(root, '.plugin-importer/sources')
+    if not base.is_dir():
+        print('No snapshots to prune.')
+        return True
+    doomed = []
+    for namespace_dir in sorted(base.iterdir()):
+        if not namespace_dir.is_dir() or namespace_dir.is_symlink():
+            continue
+        for snapshot_dir in sorted(namespace_dir.iterdir()):
+            if not snapshot_dir.is_dir() or snapshot_dir.is_symlink():
+                continue
+            relative = f'.plugin-importer/sources/{namespace_dir.name}/{snapshot_dir.name}'
+            if relative in referenced:
+                continue
+            print(f'PRUNE {relative}')
+            doomed.append(snapshot_dir)
+    if not doomed:
+        print('No unreferenced snapshots.')
+        return True
+    if preview:
+        print('Dry run: no snapshot removed.')
+        return True
+    for path in doomed:
+        shutil.rmtree(path)
+    for namespace_dir in sorted(base.iterdir()):
+        if namespace_dir.is_dir() and not namespace_dir.is_symlink():
+            try:
+                namespace_dir.rmdir()
+            except OSError:
+                pass
+    print(f'Removed {len(doomed)} unreferenced snapshot(s).')
+    return True
+
+
 def destination_path(root, relative):
     path = root / relative
     if Path(relative).is_absolute() or '..' in Path(relative).parts:
@@ -597,6 +697,32 @@ def config_read(root):
     if not isinstance(config.get('mcp', {}), dict):
         fail('OpenCode mcp must be an object.')
     return name, config
+
+
+def print_status(root):
+    """Read-only report of installed plugins; never writes to the destination."""
+    root = Path(root).expanduser().resolve()
+    state = state_read(root)
+    if not state['plugins']:
+        print('No plugins installed.')
+        return
+    _, config = config_read(root)
+    for namespace, entry in sorted(state['plugins'].items()):
+        print(f'PLUGIN {namespace}')
+        print(f'  source: {entry.get("source")}')
+        print(f'  plugin: {entry.get("plugin")}')
+        print(f'  ref: {entry.get("ref") or "(unpinned)"}')
+        print(f'  revision: {entry.get("revision") or "(local working copy)"}')
+        items = entry.get('items', {})
+        if not items:
+            print('    (no managed items)')
+        for export, item in sorted(items.items()):
+            if item.get('kind') == 'mcp':
+                present = export[4:] in config.get('mcp', {})
+            else:
+                present = (root / export).is_symlink()
+            print(f'    {export} [{item.get("kind")}] snapshot={item.get("snapshot")} '
+                  f'present={"yes" if present else "no"}')
 
 
 def check_owned(root, export, old, config, checked):
@@ -858,7 +984,7 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('source', help='Local directory or Git URL')
+    parser.add_argument('source', nargs='?', help='Local directory or Git URL')
     parser.add_argument('ref', nargs='?', help='Optional branch, tag or commit SHA')
     parser.add_argument('--plugin', help='Select a plugin in a multi-plugin repository')
     parser.add_argument('--namespace', help='Override the destination name prefix')
@@ -871,13 +997,32 @@ def main(argv=None):
                         help='Skip components OpenCode cannot represent instead of failing')
     parser.add_argument('--manual-mode', action='store_true',
                         help='Print a copy script for manual migration without writing the destination')
+    parser.add_argument('--status', action='store_true',
+                        help='Show installed plugins, source and revision without a source argument')
+    parser.add_argument('--prune-snapshots', action='store_true',
+                        help='Delete managed snapshots no longer referenced by any installed item')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('-i', '--interactive', action='store_true')
     mode.add_argument('-f', '--force', action='store_true', help='Also prune intact managed components removed upstream')
+    mode.add_argument('--uninstall', action='store_true',
+                      help='Remove a managed plugin and its MCP entries without touching unmanaged files')
+    mode.add_argument('--reset', action='store_true',
+                      help='Discard local modifications inside managed snapshots and reinstall')
     for kind in sorted(KINDS):
         parser.add_argument(f'--{kind}-only', action='store_true')
+    parser.add_argument('--keep-local', action='store_true',
+                        help='With --reset, save local snapshot modifications as a patch before discarding')
     parser.add_argument('--version', action='version', version=VERSION)
     args = parser.parse_args(argv)
+    if args.keep_local and not args.reset:
+        parser.error('--keep-local requires --reset')
+    if args.source is None:
+        if args.status:
+            print_status(args.config_dir)
+            return 0
+        if args.prune_snapshots:
+            return 0 if prune_snapshots(args.config_dir, args.dry_run) else 1
+        parser.error('source is required unless --status or --prune-snapshots is given')
     kinds = {k for k in KINDS if getattr(args, k + '_only')} or KINDS
     migration_log = []
     try:
