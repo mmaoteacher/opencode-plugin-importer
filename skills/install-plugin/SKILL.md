@@ -50,10 +50,14 @@ installs rather than adding new ones:
 - `--uninstall` (no `source` needed) removes a managed plugin's symlinks and its MCP
   entries, and drops it from the manifest. It refuses and keeps everything when a component
   was locally modified; tell the user to decide on `--reset` rather than reaching for it.
-  Add `--namespace`/`--plugin` when several plugins are installed.
+  Add `--namespace`/`--plugin` when several plugins are installed. With a component filter
+  (`--skills-only` and friends) only the selected kinds go; the manifest record is kept for
+  the rest so a later `--uninstall` can finish, and the output lists what is still managed.
 - `--prune-snapshots` (no `source` needed) deletes snapshots no installed item references.
   Snapshots accumulate across updates, so offer this after repeated updates. `--dry-run`
-  works with it.
+  works with it. If the manifest's snapshot record is damaged it stops with
+  `Invalid snapshot ownership record` and deletes nothing; report that rather than
+  suggesting `--reset`, which does not apply.
 
 If an import stops with `Local snapshot modified or missing`, the user edited a file inside
 a managed snapshot. The importer will not overwrite it. Report the affected snapshot and

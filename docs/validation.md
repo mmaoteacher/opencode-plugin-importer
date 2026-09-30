@@ -4,7 +4,7 @@ Validated on 2026-09-21 using macOS, Python 3.9.6 and OpenCode 1.18.31.
 
 ## Automated checks
 
-**72 unit/integration tests passed** with:
+**76 unit/integration tests passed** with:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
@@ -42,6 +42,10 @@ Coverage includes:
   without a source argument.
 - `--prune-snapshots` removing only unreferenced snapshots, honouring dry run, and leaving
   a later import reporting `No changes.`
+- `--prune-snapshots` refusing to delete anything when a manifest snapshot record is
+  malformed, leaving the live snapshot and its symlink intact.
+- Filtered `--uninstall` keeping the namespace record for the remaining kinds so a later
+  full uninstall can still remove them.
 
 ## Actual OpenCode check
 

@@ -5,9 +5,14 @@
 - 審查維度：Conventions / Architecture / Regression / Test / Performance
 - 驗收狀態：74 測試通過，`check_opencode.py` 通過，26 項功能矩陣通過
 
+## 修正狀態
+
+兩項必須修正已於同一 branch 修正並補回歸測試（詳見各節「✅ 已修正」）。建議項 3、4、5
+一併採納。第 6 項為文件補充，已於 README 說明。第 7、9 項屬結構性偏好，未於本次變更。
+
 ## 🚫 必須修正
 
-### 1. `--prune-snapshots` 依損毀的 manifest 刪除使用中的 snapshot（資料遺失）
+### 1. ✅ 已修正 — `--prune-snapshots` 依損毀的 manifest 刪除使用中的 snapshot（資料遺失）
 
 `skills/install-plugin/scripts/importer.py:626-651`
 
@@ -30,7 +35,13 @@ spec 的「風險與未決事項」已明確要求「若 manifest 損毀，應�
 **建議**：prune 前逐項驗證 snapshot 記錄，格式非法即 `fail()` 而非猜測。可重用
 `check_owned()` 的前綴檢查，或抽出 `validate_snapshot_record(snapshot)` 供兩處共用。
 
-### 2. `--uninstall` 搭配 component filter 會產生永久孤兒檔案
+**修正**：抽出 `validate_snapshot_record(root, snapshot)`，同時驗證前綴、`..` 路徑與
+symlink；`prune_snapshots()` 逐項呼叫，`check_owned()` 改為共用同一函式。已補
+`test_prune_refuses_when_snapshot_record_malformed`（還原修正後確實失敗），並確認
+damaged manifest 下 live snapshot 與 symlink 皆保留。prune 呼叫亦移入 `main()` 的
+例外處理，改以清楚的 `Import failed:` 訊息取代 traceback。
+
+### 2. ✅ 已修正 — `--uninstall` 搭配 component filter 會產生永久孤兒檔案
 
 `skills/install-plugin/scripts/importer.py:1005-1015`（`uninstall_plugin()` 的
 `state['plugins'].pop(target, None)`）
@@ -57,38 +68,43 @@ opencode.json mcp     → 仍含 rv3-api
 **建議**：僅當 `retained` 為空時才 `pop` namespace；否則保留 namespace 並更新其
 `items` 為剩餘項目，讓後續 `--uninstall` 能完成清理。
 
+**修正**：`retained` 非空時保留 namespace 並以剩餘項目更新其 `items`，輸出改為
+`Removed selected <ns> items from <root>; still managed: …`，提示重跑 `--uninstall`。
+已補 `test_uninstall_with_filter_keeps_namespace_record`（還原修正後確實失敗），
+並實測確認第二次 `--uninstall` 能完成清理，agent 連結與 MCP 項皆移除。
+
 ## ⚠️ 建議修正
 
-### 3. `install()` 與 `main()` 對 uninstall 走兩條分歧路徑
+### 3. ✅ 已修正 — `install()` 與 `main()` 對 uninstall 走兩條分歧路徑
 
 `skills/install-plugin/scripts/importer.py:917` 與 `importer.py:1067-1080`
 
 `main()` 在 `source is None` 時直接呼叫 `uninstall_plugin()`，有 source 時則經由
 `install()` 轉呼叫同一函式。兩條路徑的錯誤處理與回傳值處理不同（前者自行 try/except
 印 `Import failed`）。目前行為一致，但屬重複邏輯，未來修改其一容易漏掉另一處。
-建議統一由 `install()` 進入。
+**修正**：`main()` 不再自行呼叫 `uninstall_plugin()`，改為設定 `args.source` 後統一經由
+`install()` 進入，錯誤處理與回傳值只剩一條路徑。
 
-### 4. `save_local_patch()` 有未使用變數
+### 4. ✅ 已修正 — `save_local_patch()` 有未使用變數
 
 `skills/install-plugin/scripts/importer.py:602`
 
-`fresh = root / snapshot` 賦值後從未使用（下一行重新計算 `old_path`）。應刪除。
+`fresh = root / snapshot` 賦值後從未使用（下一行重新計算 `old_path`）。已刪除。
 
-### 5. `prune_snapshots()` 回傳值恆為 `True`
+### 5. ✅ 已修正 — `prune_snapshots()` 回傳值恆為 `True`
 
 `skills/install-plugin/scripts/importer.py:618-655`
 
 函式所有路徑都 `return True`，但 `main()` 以 `return 0 if prune_snapshots(...) else 1`
-決定退出碼。此布林介面目前無意義，且暗示存在失敗路徑。建議改為回傳 None，
-`main()` 直接 `return 0`，或讓函式在真實失敗時拋例外。
+決定退出碼。此布林介面目前無意義，且暗示存在失敗路徑。已改為回傳 `None`，
+`main()` 直接 `return 0`；真實失敗以例外表達。
 
 ### 6. `--keep-local` 的暫存目錄會留存
 
 `skills/install-plugin/scripts/importer.py:598`
 
 `tempfile.mkdtemp()` 建立的目錄與 patch 永久留存於系統暫存區。對「保留使用者資料」
-而言這是合理的（不可被自動清理解否），但 README 應明確告知使用者 patch 不會被自動
-刪除，需自行保存。目前 README 有說明路徑，未強調留存性。
+而言這是合理的。已於 README 說明路徑並強調 patch 不會被自動刪除、需自行保存。
 
 ## 💡 優化建議
 

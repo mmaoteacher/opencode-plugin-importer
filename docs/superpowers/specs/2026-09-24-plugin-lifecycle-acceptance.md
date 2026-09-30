@@ -5,13 +5,13 @@
 - Branch：feature/plugin-lifecycle
 - 驗收日期：2026-09-24
 - E2E：➖ 不適用（CLI 工具，無前後端；使用者可觀察行為由實際 CLI 執行涵蓋）
-- 整體結果：✅ 通過（驗收中發現並修正 1 項 CLI 層缺陷）
+- 整體結果：✅ 通過（驗收中發現並修正 1 項 CLI 層缺陷；code review 後再修正 2 項資料遺失路徑）
 
 ## 自動化檢查
 
 | 項目 | 指令 | 實際結果 | 結果 | 證據／備註 |
 |---|---|---|---|---|
-| 單元／整合測試 | `.venv/bin/python -m unittest discover -s tests` | Ran 74 tests，OK | ✅ | 進場時 72 項全綠且未退步；驗收中修正後新增 2 項共 74 項 |
+| 單元／整合測試 | `.venv/bin/python -m unittest discover -s tests` | Ran 76 tests，OK | ✅ | 進場時 72 項全綠且未退步；驗收修正 +2、code review 修正 +2，共 76 項 |
 | Shell 語法 | `bash -n skills/install-plugin/scripts/install-plugin.sh` | 無輸出，exit 0 | ✅ | |
 | OpenCode 實機 | `.venv/bin/python tests/check_opencode.py` | 發現 skill 與 agent，MCP 握手 connected | ✅ | 隔離 XDG 環境，未呼叫模型 |
 
@@ -74,6 +74,17 @@
   `test_reset_combines_with_uninstall_on_cli`、`test_reset_combines_with_force_on_cli`。
   兩者皆經負向驗證：把 `--reset` 放回 exclusive group 後確實失敗。
 - **影響**：修正後重新執行受影響的驗收項目（決策「加 `--reset` 後才可進行」）通過。
+
+## 驗收後修正（code review 產出）
+
+code review 階段實測發現兩項本報告未覆蓋的資料遺失路徑，已修正並補驗證：
+
+- `--prune-snapshots` 依損毀的 manifest 刪除使用中的 snapshot，使已安裝 skill 變成
+  dangling symlink。修正為逐項驗證 snapshot 記錄，damaged manifest 下停止且不刪除。
+- `--uninstall --skills-only` 無條件移除整個 namespace 記錄，使 agent 連結與 MCP 項
+  永遠無法再被工具清除。修正為保留剩餘項的記錄並提示重跑。
+
+詳見 code review 報告各節。修正後完整驗證：76 項測試通過、`check_opencode.py` 通過。
 
 ## 需求基準差異
 

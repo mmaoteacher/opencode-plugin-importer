@@ -124,6 +124,12 @@ update, remove and reclaim:
 `source` argument. `--uninstall` refuses when a component was locally modified and keeps
 everything; add `--reset` only after you have decided those local changes may be discarded.
 
+`--uninstall` accepts the component filters. A filtered uninstall removes only the selected
+kinds and keeps the manifest record for the rest, so a later `--uninstall` can finish the
+job; it reports what is still managed. `--prune-snapshots` validates every snapshot path in
+the manifest first and stops on a malformed record rather than guessing which resource is
+still in use.
+
 ### Recovering from local snapshot edits
 
 Installed resources are symlinks into `.plugin-importer/sources/`. Editing a file inside
