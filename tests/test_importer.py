@@ -285,6 +285,42 @@ class ImporterTests(unittest.TestCase):
         with self.assertRaisesRegex(im.ImportErrorDetail, 'Plugin is not installed'):
             self.install(namespace='absent', uninstall=True)
 
+    def snapshot_count(self, namespace='demo'):
+        base = self.dest / '.plugin-importer/sources' / namespace
+        return len(list(base.iterdir())) if base.is_dir() else 0
+
+    def test_prune_snapshots_removes_only_unreferenced(self):
+        for body in ('v1\n', 'v2\n', 'v3\n'):
+            self.skill('hello', body=body)
+            self.install()
+        self.assertEqual(self.snapshot_count(), 3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            im.prune_snapshots(self.dest)
+        self.assertEqual(self.snapshot_count(), 1)
+
+    def test_prune_snapshots_dry_run_keeps_everything(self):
+        for body in ('v1\n', 'v2\n'):
+            self.skill('hello', body=body)
+            self.install()
+        before = self.snapshot_count()
+        self.assertEqual(before, 2)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            im.prune_snapshots(self.dest, preview=True)
+        self.assertIn('Dry run: no snapshot removed.', output.getvalue())
+        self.assertEqual(self.snapshot_count(), before)
+
+    def test_prune_then_rerun_reports_no_changes(self):
+        for body in ('v1\n', 'v2\n'):
+            self.skill('hello', body=body)
+            self.install()
+        with contextlib.redirect_stdout(io.StringIO()):
+            im.prune_snapshots(self.dest)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install()
+        self.assertIn('No changes.', output.getvalue())
+
     def test_mcp_merge_prints_server_names(self):
         self.json(self.source / '.mcp.json', {'mcpServers': {'local': {'command': 'glab'}}})
         output = io.StringIO()
