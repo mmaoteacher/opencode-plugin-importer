@@ -52,9 +52,21 @@ def digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
-def valid_name(value):
+def normalize_name(value):
+    """Coerce an arbitrary label into a legal name; empty results are rejected."""
+    fixed = re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')[:64].strip('-')
+    if not fixed:
+        fail(f'Cannot derive a valid name from {value!r}; use lowercase words separated by single hyphens.')
+    return fixed
+
+
+def valid_name(value, fix=False):
     if not isinstance(value, str) or len(value) > 64 or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', value):
-        fail(f'Invalid name {value!r}; use lowercase words separated by single hyphens (max 64 characters).')
+        if not fix:
+            fail(f'Invalid name {value!r}; use lowercase words separated by single hyphens (max 64 characters).')
+        fixed = normalize_name(value)
+        warn(f'Renamed {value!r} to {fixed!r}.')
+        return fixed
     return value
 
 
@@ -188,7 +200,7 @@ def source_tree(source, ref):
         yield root, locator, git(['rev-parse', 'HEAD'], root)
 
 
-def discover(repo, fallback_name=None):
+def discover(repo, fallback_name=None, fix=False):
     candidates = {repo}
     if (repo / 'plugins').is_dir():
         candidates.update(p for p in (repo / 'plugins').iterdir() if p.is_dir())
@@ -214,14 +226,14 @@ def discover(repo, fallback_name=None):
         names = {m['name'] for m in manifests if 'name' in m}
         if len(names) > 1:
             fail(f'Conflicting plugin names in {root}')
-        name = valid_name(next(iter(names)) if names else re.sub(r'[^a-z0-9]+', '-', (fallback_name if root == repo and fallback_name else root.name).lower()).strip('-'))
+        name = valid_name(next(iter(names)) if names else re.sub(r'[^a-z0-9]+', '-', (fallback_name if root == repo and fallback_name else root.name).lower()).strip('-'), fix)
         if name in found and found[name][0].resolve() != root.resolve():
             fail(f'Duplicate plugin name: {name}')
         found[name] = (root, manifests)
     return found
 
 
-def entries(root, manifests, kind):
+def entries(root, manifests, kind, fix=False):
     paths = [root / prefix / kind for prefix in PREFIXES]
     for meta in manifests:
         custom = meta.get(kind, [])
@@ -241,14 +253,14 @@ def entries(root, manifests, kind):
                 continue
             seen.add(file.resolve())
             meta, body = markdown(file)
-            name = valid_name(meta.get('name', file.parent.name if kind == 'skills' else file.stem))
+            name = valid_name(meta.get('name', file.parent.name if kind == 'skills' else file.stem), fix)
             if name in found:
                 fail(f'Duplicate {kind} name: {name}')
             found[name] = (file.relative_to(root), meta, body)
     return found
 
 
-def mcp_entries(root, manifests):
+def mcp_entries(root, manifests, fix=False):
     sources = []
     for prefix in PREFIXES:
         for name in ('.mcp.json', 'mcp_config.json', 'opencode.json', 'opencode.jsonc'):
@@ -274,7 +286,7 @@ def mcp_entries(root, manifests):
         if not isinstance(servers, dict):
             fail('MCP servers must be a mapping.')
         for name, value in servers.items():
-            valid_name(name)
+            name = valid_name(name, fix)
             if name in result and result[name] != value:
                 if mcp_convert(result[name], root, root) != mcp_convert(value, root, root):
                     fail(f'Conflicting MCP definitions: {name}')
@@ -433,7 +445,7 @@ def agent_convert(meta):
     return result
 
 
-def build_payload(root, manifests, namespace, destination, kinds, staging):
+def build_payload(root, manifests, namespace, destination, kinds, staging, fix=False, skip=False):
     check_tree(root)
     fingerprint = tree_hash(root)
     key = digest(encoded([VERSION, fingerprint, namespace, str(destination), sorted(kinds)]))[:24]
@@ -454,7 +466,7 @@ def build_payload(root, manifests, namespace, destination, kinds, staging):
     for kind in ('skills', 'agents'):
         if kind not in kinds:
             continue
-        for name, (relative, meta, body) in entries(root, manifests, kind).items():
+        for name, (relative, meta, body) in entries(root, manifests, kind, fix).items():
             exported = valid_name(f'{namespace}-{name}')
             if kind == 'skills':
                 if meta.get('disable-model-invocation') or meta.get('user-invocable') is False or meta.get('allowed-tools'):
@@ -469,7 +481,7 @@ def build_payload(root, manifests, namespace, destination, kinds, staging):
             write_markdown(staging / relative, meta, root_tokens(body, installed))
             desired[export] = {'kind': kind, 'link': os.path.relpath(linked, (destination / export).parent)}
     if 'mcp' in kinds:
-        for name, config in mcp_entries(root, manifests).items():
+        for name, config in mcp_entries(root, manifests, fix).items():
             exported = valid_name(f'{namespace}-{name}')
             desired[f'mcp/{exported}'] = {'kind': 'mcp', 'value': mcp_convert(config, root, installed)}
     if any((root / path).exists() for path in ('hooks', 'hooks.json', 'commands')) or any('hooks' in m for m in manifests):
@@ -684,20 +696,21 @@ def install_lock(root, preview):
         yield
 
 
-def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', preview=False, listing=False, ask=input):
+def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', preview=False, listing=False, ask=input,
+            fix=False, skip=False, manual=False):
     root = Path(root).expanduser().resolve()
     with source_tree(source, ref) as (repo, locator, revision):
         fallback_name = Path(locator.rstrip('/')).name.removesuffix('.git')
-        plugins = discover(repo, fallback_name)
+        plugins = discover(repo, fallback_name, fix)
         if not plugins:
             fail('No supported plugin components found.')
         if listing and not selected_plugin:
             for name, (plugin_root, manifests) in sorted(plugins.items()):
                 print(f'PLUGIN {name} ({plugin_root.relative_to(repo)})')
                 for kind in ('skills', 'agents'):
-                    for entry in entries(plugin_root, manifests, kind):
+                    for entry in entries(plugin_root, manifests, kind, fix):
                         print(f'  {kind}: {entry}')
-                for entry in mcp_entries(plugin_root, manifests):
+                for entry in mcp_entries(plugin_root, manifests, fix):
                     print(f'  mcp: {entry}')
             return
         if not selected_plugin:
@@ -712,7 +725,7 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
             fail('Destination must not be inside the source plugin.')
         with tempfile.TemporaryDirectory(prefix='opencode-import-payload-') as temp:
             staging = Path(temp) / 'payload'
-            desired, fingerprint, snapshot = build_payload(plugin_root, manifests, namespace, root, kinds, staging)
+            desired, fingerprint, snapshot = build_payload(plugin_root, manifests, namespace, root, kinds, staging, fix, skip)
             if listing:
                 for key in sorted(desired):
                     print(key)
@@ -759,6 +772,10 @@ def main(argv=None):
     parser.add_argument('--config-dir', default=os.environ.get('OPENCODE_CONFIG_DIR', str(Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'opencode')))
     parser.add_argument('--list', action='store_true', help='List components without writing the destination')
     parser.add_argument('--dry-run', action='store_true', help='Validate and preview without destination writes')
+    parser.add_argument('--fix-names', action='store_true',
+                        help='Normalize invalid names to lowercase hyphenated form instead of failing')
+    parser.add_argument('--skip-unsupported', action='store_true',
+                        help='Skip components OpenCode cannot represent instead of failing')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('-i', '--interactive', action='store_true')
     mode.add_argument('-f', '--force', action='store_true', help='Also prune intact managed components removed upstream')
@@ -769,7 +786,8 @@ def main(argv=None):
     kinds = {k for k in KINDS if getattr(args, k + '_only')} or KINDS
     try:
         install(args.config_dir, args.source, args.ref, args.plugin, args.namespace, kinds,
-                'interactive' if args.interactive else 'force' if args.force else 'sync', args.dry_run, args.list)
+                'interactive' if args.interactive else 'force' if args.force else 'sync', args.dry_run, args.list,
+                fix=args.fix_names, skip=args.skip_unsupported)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)
         return 1

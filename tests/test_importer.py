@@ -97,6 +97,20 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def test_fix_names_normalizes_mcp_and_agent_names(self):
+        self.skill('My Skill')
+        self.json(self.source / '.mcp.json', {'mcpServers': {'GitLab': {'command': 'glab'}}})
+        self.install(fix=True)
+        self.assertTrue((self.dest / 'skills/demo-my-skill').is_symlink())
+        config = json.loads((self.dest / 'opencode.json').read_text())
+        self.assertIn('demo-gitlab', config['mcp'])
+
+    def test_fix_names_absent_still_fails(self):
+        self.json(self.source / '.mcp.json', {'mcpServers': {'GitLab': {'command': 'glab'}}})
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Invalid name'):
+            self.install()
+        self.assertFalse(self.dest.exists())
+
     def test_multiple_plugins_require_explicit_selection(self):
         nested = self.source / 'plugins/other'
         self.json(nested / 'plugin.json', {'name': 'other'})
