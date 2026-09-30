@@ -10,6 +10,45 @@ its host-specific commands, hooks or setup workflow compatible with OpenCode.
 
 ## Quick start
 
+Install the skill, then set up a Python environment for it. The skill ships its scripts
+and `requirements.txt`, but **it cannot install Python dependencies for you** — that step
+is required before the first run.
+
+```bash
+# 1. Install the skill (copies SKILL.md and scripts/ into ~/.agents/skills/install-plugin)
+npx skills add mmaoteacher/opencode-plugin-importer --skill install-plugin -a opencode
+
+# 2. Create an environment for its dependencies. Keep it outside the skill directory so
+#    it is not mistaken for skill content, and do not modify a global Python install.
+python3 -m venv ~/cache/plugin-env
+source ~/cache/plugin-env/bin/activate
+python -m pip install -r ~/.agents/skills/install-plugin/scripts/requirements.txt
+
+# 3. Preview, then import. Both previews are read-only and never write the destination.
+SCRIPT=~/.agents/skills/install-plugin/scripts/importer.py
+python "$SCRIPT" /path/to/plugin --list
+python "$SCRIPT" /path/to/plugin --dry-run
+python "$SCRIPT" /path/to/plugin
+```
+
+Skipping step 2 fails fast with a clear message rather than a traceback:
+
+```
+Missing PyYAML. Install scripts/requirements.txt in a Python virtual environment first.
+```
+
+Only `PyYAML` (and `tomli` on Python 3.10 and earlier) is required. Activate the
+environment in each new shell, or call its interpreter by absolute path.
+
+If a source contains features OpenCode cannot represent, a strict run stops with an error
+listing every convertible path. See
+[Conversion and failure behavior](#conversion-and-failure-behavior) for `--fix-names`,
+`--skip-unsupported` and `--manual-mode`.
+
+### Working from a clone
+
+To read or modify the importer itself:
+
 ```bash
 git clone https://github.com/mmaoteacher/opencode-plugin-importer.git
 cd opencode-plugin-importer
@@ -18,21 +57,10 @@ source .venv/bin/activate
 python -m pip install -r skills/install-plugin/scripts/requirements.txt
 
 ./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin --list
-./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin --dry-run
-./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin
 ```
 
 The shell entrypoint also works on macOS's bundled Bash; the implementation is Python.
 Alternatively run `python skills/install-plugin/scripts/importer.py` directly.
-
-To expose the bundled skill through a skill installer:
-
-```bash
-npx skills add mmaoteacher/opencode-plugin-importer --skill install-plugin -a opencode
-```
-
-The skill includes its scripts and dependency requirements. It explains how to use a
-separate virtual environment; installing the skill alone does not install Python dependencies.
 
 ## Sources and selection
 
