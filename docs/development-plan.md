@@ -42,6 +42,24 @@ See the [validation record](validation.md).
       manifest is damaged.
 - [x] 76 tests passing plus real OpenCode discovery/MCP handshake.
 
+## Completed (0.3.0)
+
+- [x] Agent `color` is validated against the values OpenCode accepts (`#rrggbb` or one of eight
+      semantic names), measured against the CLI rather than assumed. A Claude Code color name
+      used to import cleanly and then stop OpenCode from loading every agent.
+- [x] `--report <path>` writes every refused component as JSON: export, kind, offending key and
+      value, source path, reason and repair candidates. Written on success and on failure.
+- [x] Repair candidates are deterministic rather than guessed — a replacement value, dropping
+      the key, or `ask` where no portable answer exists.
+- [x] A strict run collects every refused component before aborting, so one report covers one
+      decision per component. It still writes nothing.
+- [x] `--manual-mode` comments the components it refused instead of omitting them, which
+      previously left out exactly the parts needing hand migration.
+- [x] The skill documents the repair loop, including that repairs apply to the source and not
+      to the destination.
+- [x] `docs/known-issues.md` records defects found during a real import, with two still open.
+- [x] 88 tests passing.
+
 ## Explicitly deferred
 
 - Automatic manifest migration from the original personal install script: the old records

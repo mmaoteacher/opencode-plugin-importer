@@ -3,7 +3,7 @@
 Import **skills, Markdown agents and MCP configuration** from existing Claude Code,
 Codex, agy or OpenCode repositories into OpenCode. No registry conversion is required.
 
-Version **0.2.0** · macOS / Linux · Python **3.9+** · Git · MIT
+Version **0.3.0** · macOS / Linux · Python **3.9+** · Git · MIT
 
 This is a component importer, not a runtime emulator. Importing a skill does not make
 its host-specific commands, hooks or setup workflow compatible with OpenCode.
