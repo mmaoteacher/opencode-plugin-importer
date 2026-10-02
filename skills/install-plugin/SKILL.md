@@ -76,11 +76,45 @@ source contains a few unsupported pieces, offer these options and let the user c
   skipped item, and installs the rest. Skipped items are not recorded as managed, so a later
   run retries them. A component skipped by one run is **not** removed even under `--force`;
   report it as kept-but-unsupported so the user knows it is still installed but stale.
+- `--report <path>` writes a JSON report of every refused component, including repair
+  candidates. It is written on success and on failure, so it also lists what a
+  `--skip-unsupported` run left out. Use it before choosing between the options above.
 - `--manual-mode` prints a reviewable `sh` copy script and writes nothing. Use it when the
   user wants to migrate by hand. The script copies original source files, so frontmatter
-  conversion is not applied; MCP servers are listed as a comment to merge by hand.
+  conversion is not applied; MCP servers are listed as a comment to merge by hand, and every
+  component that could not be converted is listed as a comment with its repair options rather
+  than being silently absent.
 - Without any of these options, a failure prints a manual migration list mapping each
   converted source path to its intended destination. Nothing is written on failure.
+
+## Offering the user a repair choice
+
+Do not resolve an unconvertible component on the user's behalf, and never edit the destination
+to work around a refusal: installed components are symlinks into an importer-managed snapshot,
+so hand edits there make every later run stop with `Local snapshot modified or missing`.
+
+1. Re-run the refused import with `--report <path>` and read the report.
+2. For each entry in `issues`, present the user with the component, the offending key and
+   value, the reason, and the candidates from `repairs`. Each repair is one of:
+   - `set` — the source frontmatter key takes the given value;
+   - `drop` — remove that key from the source frontmatter;
+   - `ask` — there is no portable replacement; ask the user for a value.
+   Use the host's question tool with one option per repair, label the `ask` entry so the user
+   can type their own value, and state which file will change before applying anything.
+3. Apply the chosen repairs to `source_path` in the source repository, not to the destination.
+   Keep every unrelated field untouched.
+4. Re-run the same import. A repaired component installs normally and disappears from the
+   report; anything still listed is still unresolved, so report it rather than retrying
+   unchanged. One component can hide further problems: conversion stops at the first
+   unconvertible field, so re-run after each fix and expect the next one to appear.
+5. Verify with `opencode debug skill` and `opencode debug agent <name>`. A clean preview is not
+   a load test: OpenCode validates fields the importer passes through, such as agent `color`.
+
+Where a repair needs knowledge the importer does not have, say so instead of guessing. A third
+party MCP server decides its own tool names, so mapping `mcp__<server>__<tool>` needs the
+installed server's real tool list, and turning a model alias into `provider/model` needs a
+provider the importer cannot see. Offer to inspect the destination's MCP configuration, or ask,
+and treat the answer as the repair value.
 
 MCP servers are written into the `mcp` object of the existing `opencode.json` /
 `opencode.jsonc`; the importer never creates a separate MCP JSON file in the destination.

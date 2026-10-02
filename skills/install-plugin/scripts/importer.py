@@ -24,7 +24,7 @@ try:
 except ImportError:
     sys.exit('Missing PyYAML. Install scripts/requirements.txt in a Python virtual environment first.')
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 STATE = '.plugin-importer/manifest.json'
 MANIFESTS = ('plugin.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json', '.agy-plugin/plugin.json')
 PREFIXES = ('', '.claude', '.codex', '.opencode', '.agents')
@@ -34,11 +34,20 @@ SKIP_DIRS = {'.git', '__pycache__', '.venv', 'node_modules'}
 
 
 class ImportErrorDetail(ValueError):
-    pass
+    """A conversion failure, optionally carrying a machine-readable issue description.
+
+    `issue` is filled in where the failure is raised and enriched with the destination
+    export and source path once the surrounding component is known, so --report can emit
+    repair candidates without the raise site knowing either.
+    """
+
+    def __init__(self, message, issue=None):
+        super().__init__(message)
+        self.issue = issue
 
 
-def fail(message):
-    raise ImportErrorDetail(message)
+def fail(message, issue=None):
+    raise ImportErrorDetail(message, issue)
 
 
 def warn(message):
@@ -395,25 +404,89 @@ def mcp_convert(config, root, installed):
 TOOLS = {'Read': 'read', 'Write': 'edit', 'Edit': 'edit', 'MultiEdit': 'edit', 'Bash': 'bash',
          'Glob': 'glob', 'Grep': 'grep', 'LS': 'list', 'WebFetch': 'webfetch', 'WebSearch': 'websearch',
          'Task': 'task', 'Agent': 'task', 'Skill': 'skill', 'TodoWrite': 'todowrite', 'TodoRead': 'todoread'}
+AGENT_COLORS = ('primary', 'secondary', 'accent', 'success', 'warning', 'error', 'info')
+HEX_COLOR = re.compile(r'^#[0-9a-fA-F]{6}$')
+
+
+def repair(action, key=None, value=None, note=''):
+    entry = {'action': action}
+    if key is not None:
+        entry['key'] = key
+    if value is not None:
+        entry['value'] = value
+    if note:
+        entry['note'] = note
+    return entry
+
+
+def ask_repair():
+    return repair('ask', note='No portable replacement exists; the user decides the value.')
+
+
+def color_repairs():
+    return [repair('set', 'color', name, 'OpenCode semantic color.') for name in AGENT_COLORS] + [
+        repair('set', 'color', '#f59e0b', 'Six-digit hex, for example #f59e0b.'),
+        repair('drop', 'color', note='Removes the color and lets OpenCode choose a default.'),
+        ask_repair(),
+    ]
+
+
+def model_repairs():
+    return [repair('set', 'model', 'inherit', 'Use the host default model.'),
+            repair('set', 'model', 'provider/model',
+                   'Template, not a value: replace with a provider-qualified id such as anthropic/claude-sonnet-4.'),
+            ask_repair()]
+
+
+def drop_repairs(keys, note):
+    return [repair('drop', key, note=note) for key in keys] + [ask_repair()]
+
+
+def tools_repairs(meta):
+    values = [v.strip() for v in meta.split(',')] if isinstance(meta, str) else list(meta)
+    known = [v for v in values if v in TOOLS or v in TOOLS.values()]
+    unknown = [v for v in values if v not in known]
+    repairs = []
+    if known:
+        repairs.append(repair('set', 'tools', known,
+                              'Keeps the tools that have a portable name; drops '
+                              + ', '.join(repr(u) for u in unknown) + '.'))
+    repairs.append(repair('drop', 'tools', note='Removes the tool allowlist entirely.'))
+    repairs.append(ask_repair())
+    return repairs
 
 
 def agent_convert(meta):
     meta = copy.deepcopy(meta)
-    if any(k in meta for k in ('permissionMode', 'hooks', 'mcpServers', 'skills', 'isolation')):
-        fail('Agent has unsupported permissions/hooks/MCP/skills/isolation. Convert it explicitly before importing.')
+    blocked = [k for k in ('permissionMode', 'hooks', 'mcpServers', 'skills', 'isolation') if k in meta]
+    if blocked:
+        fail('Agent has unsupported permissions/hooks/MCP/skills/isolation. Convert it explicitly before importing.',
+             issue={'key': blocked[0] if len(blocked) == 1 else None,
+                    'value': meta.get(blocked[0]) if len(blocked) == 1 else None,
+                    'repairs': drop_repairs(blocked, 'OpenCode has no equivalent for this agent field.')})
     result = {k: v for k, v in meta.items() if k in {'description', 'mode', 'temperature', 'top_p', 'steps', 'hidden', 'color', 'disable', 'permission'}}
     result.setdefault('mode', 'subagent')
     if result['mode'] not in ('primary', 'subagent', 'all'):
-        fail('Unsupported agent mode.')
+        fail('Unsupported agent mode.',
+             issue={'key': 'mode', 'value': result['mode'], 'repairs': [ask_repair()]})
+    color = result.get('color')
+    if color is not None:
+        acceptable = isinstance(color, str) and (HEX_COLOR.match(color) or color in AGENT_COLORS)
+        if not acceptable:
+            fail(f'Agent color {color!r} is not a value OpenCode accepts; '
+                 f'use a #rrggbb hex color or one of {", ".join(AGENT_COLORS)}.',
+                 issue={'key': 'color', 'value': color, 'repairs': color_repairs()})
     model = meta.get('model')
     if model and model != 'inherit':
         if isinstance(model, str) and '/' in model:
             result['model'] = model
         else:
-            fail(f'Model alias {model!r} has no portable mapping; use provider/model or inherit.')
+            fail(f'Model alias {model!r} has no portable mapping; use provider/model or inherit.',
+                 issue={'key': 'model', 'value': model, 'repairs': model_repairs()})
     permission = copy.deepcopy(result.get('permission', {}))
     if not isinstance(permission, dict):
-        fail('Agent permission must be a mapping.')
+        fail('Agent permission must be a mapping.',
+             issue={'key': 'permission', 'value': result.get('permission'), 'repairs': [ask_repair()]})
     if 'tools' in meta:
         tools = meta['tools']
         if isinstance(tools, str):
@@ -422,21 +495,27 @@ def agent_convert(meta):
             permissions = {'*': 'deny'}
             for tool in tools:
                 if tool not in TOOLS and tool not in TOOLS.values():
-                    fail(f'Unknown agent tool: {tool}')
+                    fail(f'Unknown agent tool: {tool}',
+                         issue={'key': 'tools', 'value': tool, 'repairs': tools_repairs(meta['tools'])})
                 permissions[TOOLS.get(tool, tool)] = 'allow'
         elif isinstance(tools, dict) and all(type(v) is bool for v in tools.values()):
             permissions = {TOOLS.get(k, k): 'allow' if v else 'deny' for k, v in tools.items()}
         else:
-            fail('Agent tools must be a list, comma-separated string, or boolean mapping.')
+            fail('Agent tools must be a list, comma-separated string, or boolean mapping.',
+                 issue={'key': 'tools', 'value': meta['tools'], 'repairs': [ask_repair()]})
         if permission:
-            fail('Agent combines tools and permission; convert to a single permission map first.')
+            fail('Agent combines tools and permission; convert to a single permission map first.',
+                 issue={'key': 'permission', 'value': meta.get('permission'),
+                        'repairs': drop_repairs(['permission', 'tools'],
+                                                'Keep one of the two; OpenCode takes a single permission map.')})
         permission = permissions
     denied = meta.get('disallowedTools', [])
     if isinstance(denied, str):
         denied = [v.strip() for v in denied.split(',')]
     for tool in denied:
         if tool not in TOOLS and tool not in TOOLS.values():
-            fail(f'Unknown disallowed tool: {tool}')
+            fail(f'Unknown disallowed tool: {tool}',
+                 issue={'key': 'disallowedTools', 'value': tool, 'repairs': tools_repairs(meta['disallowedTools'])})
         permission[TOOLS.get(tool, tool)] = 'deny'
     if permission:
         result['permission'] = permission
@@ -447,12 +526,14 @@ def agent_convert(meta):
 
 
 def build_payload(root, manifests, namespace, destination, kinds, staging, fix=False, skip=False,
-                  migration_log=None, skipped=None):
+                  migration_log=None, skipped=None, issues=None):
     """Convert one plugin into OpenCode resources.
 
     migration_log collects (export, source path) for convertible items so a later failure
     can hand the user a manual path list. skipped collects exports this run refused to
     convert; a skipped export is still present upstream, so an installed copy must survive.
+    issues collects a machine-readable description of each refusal, including the repair
+    candidates the raise site could determine, so --report can offer the user a choice.
     """
     check_tree(root)
     fingerprint = tree_hash(root)
@@ -476,14 +557,24 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
             continue
         for name, (relative, meta, body) in entries(root, manifests, kind, fix).items():
             exported = valid_name(f'{namespace}-{name}')
+            origin = root / (relative.parent if kind == 'skills' else relative)
             if kind == 'skills':
                 export = f'skills/{exported}'
-                if meta.get('disable-model-invocation') or meta.get('user-invocable') is False or meta.get('allowed-tools'):
+                offending = [key for key, present in (('disable-model-invocation', meta.get('disable-model-invocation')),
+                                                     ('user-invocable', meta.get('user-invocable') is False),
+                                                     ('allowed-tools', meta.get('allowed-tools'))) if present]
+                if offending:
                     message = f'Skill {name} uses invocation/tool restrictions OpenCode cannot preserve; adapt it explicitly.'
-                    if not skip:
-                        fail(message)
-                    warn(f'Skipping skill {name}: {message}')
-                    skipped.add(export)
+                    issue = {'kind': 'skills', 'export': export, 'source_path': str(origin), 'reason': message,
+                             'key': offending[0] if len(offending) == 1 else None,
+                             'value': meta.get(offending[0]) if len(offending) == 1 else None,
+                             'repairs': drop_repairs(offending, 'OpenCode cannot express this skill restriction; '
+                                                               'removing it widens what the skill may do.')}
+                    if issues is not None:
+                        issues.append(issue)
+                    if skip:
+                        warn(f'Skipping skill {name}: {message}')
+                        skipped.add(export)
                     continue
                 meta['name'] = exported
                 linked = installed / relative.parent
@@ -492,10 +583,14 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
                 try:
                     meta = agent_convert(meta)
                 except ImportErrorDetail as exc:
-                    if not skip:
-                        raise
-                    warn(f'Skipping agent {name}: {exc}')
-                    skipped.add(export)
+                    issue = dict(exc.issue or {})
+                    issue.update(kind='agents', export=export, source_path=str(origin), reason=str(exc))
+                    issue.setdefault('repairs', [ask_repair()])
+                    if issues is not None:
+                        issues.append(issue)
+                    if skip:
+                        warn(f'Skipping agent {name}: {exc}')
+                        skipped.add(export)
                     continue
                 linked = installed / relative
             write_markdown(staging / relative, meta, root_tokens(body, installed))
@@ -508,14 +603,24 @@ def build_payload(root, manifests, namespace, destination, kinds, staging, fix=F
             try:
                 value = mcp_convert(config, root, installed)
             except ImportErrorDetail as exc:
-                if not skip:
-                    raise
-                warn(f'Skipping MCP server {name}: {exc}')
-                skipped.add(f'mcp/{exported}')
+                issue = dict(exc.issue or {})
+                issue.update(kind='mcp', export=f'mcp/{exported}', reason=str(exc))
+                issue.setdefault('key', 'mcpServers')
+                issue.setdefault('value', name)
+                issue.setdefault('repairs', [ask_repair()])
+                if issues is not None:
+                    issues.append(issue)
+                if skip:
+                    warn(f'Skipping MCP server {name}: {exc}')
+                    skipped.add(f'mcp/{exported}')
                 continue
             desired[f'mcp/{exported}'] = {'kind': 'mcp', 'value': value}
             if migration_log is not None:
                 migration_log.append((f'mcp/{exported}', None))
+    if issues and not skip:
+        # Strict mode still writes nothing, but it collects every refusal first so --report
+        # can offer the user one decision per problem instead of one per run.
+        fail(issues[0]['reason'], issue=issues[0])
     if any((root / path).exists() for path in ('hooks', 'hooks.json', 'commands')) or any('hooks' in m for m in manifests):
         warn('Hooks and slash-command definitions are not imported; only skills, Markdown agents and MCP are supported.')
     check_tree(staging)
@@ -529,7 +634,20 @@ def shell_quote(value):
     return "'" + str(value).replace("'", "'\\''") + "'"
 
 
-def print_manual_script(desired, migration_log):
+def write_report(path, source, namespace, issues):
+    """Write the machine-readable refusal report; a no-op unless --report named a path."""
+    if not path:
+        return
+    target = Path(path).expanduser()
+    if target.parent and not target.parent.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+    document = {'importer_version': VERSION, 'source': source, 'namespace': namespace,
+                'issue_count': len(issues), 'issues': issues}
+    target.write_text(json.dumps(document, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    print(f'Wrote {len(issues)} issue(s) to {target}')
+
+
+def print_manual_script(desired, migration_log, issues=()):
     """Print a reviewable copy script; the caller returns without touching the destination."""
     sources = dict(migration_log)
     print('#!/bin/sh')
@@ -558,6 +676,22 @@ def print_manual_script(desired, migration_log):
         print(f'# Merge these MCP servers into "$DEST"/opencode.jsonc under "mcp" manually:')
         for key in mcp_keys:
             print(f'#   {key}')
+    unconverted = [issue for issue in issues if issue.get('export')]
+    if unconverted:
+        print('#')
+        print('# Not copied: these components have no OpenCode representation. Repair the')
+        print('# source first, then re-run the import; copying them as-is would install a')
+        print('# component OpenCode cannot load.')
+        for issue in unconverted:
+            print(f'#   {issue["export"]} <- {issue.get("source_path", "unknown source")}')
+            print(f'#     {issue["reason"]}')
+            for entry in issue.get('repairs', []):
+                if entry['action'] == 'ask':
+                    print('#     repair: choose a value yourself')
+                elif entry['action'] == 'drop':
+                    print(f'#     repair: remove {entry["key"]}')
+                else:
+                    print(f'#     repair: set {entry["key"]} = {json.dumps(entry.get("value"), ensure_ascii=False)}')
 
 
 def snapshot_changes(root, old_items):
@@ -927,7 +1061,7 @@ def install_lock(root, preview):
 
 
 def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', preview=False, listing=False, ask=input,
-            fix=False, skip=False, manual=False, migration_log=None, skipped=None,
+            fix=False, skip=False, manual=False, migration_log=None, skipped=None, issues=None,
             reset=False, keep_local=False, uninstall=False):
     root = Path(root).expanduser().resolve()
     # Caller-owned so a failure before build_payload cannot report a previous run's paths.
@@ -935,6 +1069,8 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
         migration_log = []
     if skipped is None:
         skipped = set()
+    if issues is None:
+        issues = []
     if uninstall:
         return uninstall_plugin(root, selected_plugin, namespace, kinds, mode, preview, ask, reset)
     with source_tree(source, ref) as (repo, locator, revision):
@@ -965,13 +1101,14 @@ def install(root, source, ref, selected_plugin, namespace, kinds, mode='sync', p
             staging = Path(temp) / 'payload'
             desired, fingerprint, snapshot = build_payload(plugin_root, manifests, namespace, root, kinds,
                                                            staging, fix=fix, skip=skip,
-                                                           migration_log=migration_log, skipped=skipped)
+                                                           migration_log=migration_log, skipped=skipped,
+                                                           issues=issues)
             if listing:
                 for key in sorted(desired):
                     print(key)
                 return
             if manual:
-                print_manual_script(desired, migration_log)
+                print_manual_script(desired, migration_log, issues)
                 return
             with install_lock(root, preview):
                 for item in desired.values():
@@ -1075,6 +1212,8 @@ def main(argv=None):
                         help='Skip components OpenCode cannot represent instead of failing')
     parser.add_argument('--manual-mode', action='store_true',
                         help='Print a copy script for manual migration without writing the destination')
+    parser.add_argument('--report', metavar='PATH',
+                        help='Write a JSON report of every component refused as unsupported, with repair options')
     parser.add_argument('--status', action='store_true',
                         help='Show installed plugins, source and revision without a source argument')
     parser.add_argument('--prune-snapshots', action='store_true',
@@ -1105,6 +1244,7 @@ def main(argv=None):
         if args.uninstall:
             args.source = args.namespace
     migration_log = []
+    issues = []
     try:
         if args.prune_snapshots:
             prune_snapshots(args.config_dir, args.dry_run)
@@ -1115,9 +1255,20 @@ def main(argv=None):
                 args.dry_run, args.list,
                 fix=args.fix_names, skip=args.skip_unsupported, manual=args.manual_mode,
                 migration_log=migration_log, reset=args.reset, keep_local=args.keep_local,
-                uninstall=args.uninstall)
+                uninstall=args.uninstall, issues=issues)
     except (ValueError, OSError, KeyError, TypeError) as exc:
+        if isinstance(exc, ImportErrorDetail) and exc.issue and not any(i.get('export') for i in issues):
+            enriched = dict(exc.issue, reason=str(exc))
+            issues.append(enriched)
         print(f'Import failed: {exc}', file=sys.stderr)
+        if issues:
+            print(f'{len(issues)} component(s) cannot be represented in OpenCode:', file=sys.stderr)
+            for issue in issues:
+                location = issue.get('key') or 'frontmatter'
+                if issue.get('value') is not None:
+                    location = f'{location}={issue["value"]!r}'
+                print(f'  {issue.get("export")} ({issue.get("kind")}) {location}', file=sys.stderr)
+                print(f'    {issue["reason"]}', file=sys.stderr)
         if migration_log:
             print('Manual migration list (converted but not installed):', file=sys.stderr)
             for export, source in migration_log:
@@ -1127,7 +1278,11 @@ def main(argv=None):
                     print(f'  {export} (MCP; merge into opencode.jsonc manually)', file=sys.stderr)
             print('Re-run with --fix-names / --skip-unsupported, or copy these paths yourself.',
                   file=sys.stderr)
+        if issues:
+            print(f'Run with --report to get repair options for each of these.', file=sys.stderr)
+        write_report(args.report, args.source, args.namespace or args.plugin, issues)
         return 1
+    write_report(args.report, args.source, args.namespace or args.plugin, issues)
     return 0
 
 

@@ -3,7 +3,7 @@
 Import **skills, Markdown agents and MCP configuration** from existing Claude Code,
 Codex, agy or OpenCode repositories into OpenCode. No registry conversion is required.
 
-Version **0.2.0** · macOS / Linux · Python **3.9+** · Git · MIT
+Version **0.3.0** · macOS / Linux · Python **3.9+** · Git · MIT
 
 This is a component importer, not a runtime emulator. Importing a skill does not make
 its host-specific commands, hooks or setup workflow compatible with OpenCode.
@@ -80,12 +80,25 @@ Alternatively run `python skills/install-plugin/scripts/importer.py` directly.
 # Use a different destination/prefix or select component types
 ./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin --config-dir /tmp/opencode-preview --dry-run
 ./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin --namespace my-team --skills-only --agents-only
+
+# Machine-readable list of what could not be converted, with repair options
+./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin --report /tmp/import-report.json
 ```
 
 Default destination: `OPENCODE_CONFIG_DIR`, otherwise `$XDG_CONFIG_HOME/opencode`
 (default `~/.config/opencode`). `--config-dir` takes precedence.
 Preview/listing may clone Git into a temporary directory; **neither writes the destination**.
 Embedded HTTPS credentials are rejected; use your existing Git credentials or SSH.
+
+`--report <path>` records every component refused as unsupported: the offending key and value,
+the reason, and the repairs the importer could determine — set a key to a given value, drop it,
+or `ask` when no portable answer exists. It is written on success and on failure, so it also
+shows what a `--skip-unsupported` run left out. Repairs are applied to the **source**, never to
+the destination, and the import is then re-run. A strict run collects every refused component
+before aborting, so one report covers one decision per component; within a single component
+conversion still stops at the first unconvertible field, so re-run after each fix. The importer
+never guesses where guessing would be wrong: an MCP tool name depends on the installed server,
+and a model alias needs a provider it cannot see, so those surface as `ask`.
 
 ### Source support
 
@@ -187,6 +200,10 @@ temporary directory and prints the path; review it before deleting anything.
 - Agent tool lists become explicit permission allowlists; disallowed tools remain denied.
   `Write`, `Edit` and `MultiEdit` share OpenCode's `edit` permission. `model: inherit` uses the
   host default; other models must use `provider/model`, not Claude-specific aliases.
+- Agent `color` must be a `#rrggbb` hex value or one of `primary`, `secondary`, `accent`,
+  `success`, `warning`, `error`, `info`. CSS color names such as `orange` are rejected, because
+  OpenCode refuses to load an agent whose color it does not accept — and it validates every agent
+  file before loading any of them, so one bad value disables them all.
 - Unsupported restriction mappings (such as skill `allowed-tools`, restrictive invocation
   flags or agent `permissionMode`) fail before installation. Nontranslated agent metadata
   produces warnings. Review source instructions for any other host-specific behavior.
@@ -200,7 +217,9 @@ temporary directory and prints the path; review it before deleting anything.
   and writes nothing.
 - `--manual-mode` prints a reviewable `sh` copy script without writing the destination. It
   copies original source files, so frontmatter conversion is not applied; MCP servers are
-  listed as a comment to merge by hand.
+  listed as a comment to merge by hand. Components that could not be converted appear as
+  comments naming the source path, the reason and the repair options, rather than being
+  missing from the script.
 - JSON and JSONC are accepted. MCP servers are merged into the `mcp` object of the existing
   `opencode.json` / `opencode.jsonc`; no separate MCP JSON file is created in the
   destination. Updates preserve unrelated configuration values, but normalize
@@ -234,6 +253,11 @@ python tests/check_opencode.py
 The OpenCode check discovers an imported skill and agent and performs a MCP handshake,
 without model requests. See [validation results](docs/validation.md) and
 [development notes](docs/development-plan.md).
+
+`--list` and `--dry-run` report on what this importer converts; they do not ask OpenCode whether
+it accepts the result. A preview that completes cleanly is not a load test. `tests/check_opencode.py`
+is the check that starts OpenCode against a real install. Known gaps are tracked in
+[docs/known-issues.md](docs/known-issues.md).
 
 ## Related projects
 
