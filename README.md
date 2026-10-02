@@ -187,6 +187,10 @@ temporary directory and prints the path; review it before deleting anything.
 - Agent tool lists become explicit permission allowlists; disallowed tools remain denied.
   `Write`, `Edit` and `MultiEdit` share OpenCode's `edit` permission. `model: inherit` uses the
   host default; other models must use `provider/model`, not Claude-specific aliases.
+- Agent `color` must be a `#rrggbb` hex value or one of `primary`, `secondary`, `accent`,
+  `success`, `warning`, `error`, `info`. CSS color names such as `orange` are rejected, because
+  OpenCode refuses to load an agent whose color it does not accept — and it validates every agent
+  file before loading any of them, so one bad value disables them all.
 - Unsupported restriction mappings (such as skill `allowed-tools`, restrictive invocation
   flags or agent `permissionMode`) fail before installation. Nontranslated agent metadata
   produces warnings. Review source instructions for any other host-specific behavior.
@@ -234,6 +238,11 @@ python tests/check_opencode.py
 The OpenCode check discovers an imported skill and agent and performs a MCP handshake,
 without model requests. See [validation results](docs/validation.md) and
 [development notes](docs/development-plan.md).
+
+`--list` and `--dry-run` report on what this importer converts; they do not ask OpenCode whether
+it accepts the result. A preview that completes cleanly is not a load test. `tests/check_opencode.py`
+is the check that starts OpenCode against a real install. Known gaps are tracked in
+[docs/known-issues.md](docs/known-issues.md).
 
 ## Related projects
 

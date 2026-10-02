@@ -501,6 +501,26 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def test_agent_color_must_be_a_value_opencode_accepts(self):
+        self.agent('reviewer', extra='color: orange\n')
+        with self.assertRaisesRegex(im.ImportErrorDetail, 'Agent color'):
+            self.install()
+        self.assertFalse(self.dest.exists())
+
+    def test_agent_color_accepts_hex_and_semantic_names(self):
+        self.agent('hexed', extra='color: "#F59E0B"\n')
+        self.agent('semantic', extra='color: warning\n')
+        self.install()
+        self.assertEqual(im.markdown(self.dest / 'agents/demo-hexed.md')[0]['color'], '#F59E0B')
+        self.assertEqual(im.markdown(self.dest / 'agents/demo-semantic.md')[0]['color'], 'warning')
+
+    def test_bad_agent_color_is_skipped_without_dropping_the_plugin(self):
+        self.agent('reviewer', extra='color: orange\n')
+        self.agent('planner')
+        self.install(skip=True)
+        self.assertTrue((self.dest / 'agents/demo-planner.md').exists())
+        self.assertFalse((self.dest / 'agents/demo-reviewer.md').exists())
+
     def test_agent_tool_allowlist_and_denials(self):
         path = self.source / 'agents/reviewer.md'
         path.parent.mkdir()

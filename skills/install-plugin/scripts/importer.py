@@ -395,6 +395,8 @@ def mcp_convert(config, root, installed):
 TOOLS = {'Read': 'read', 'Write': 'edit', 'Edit': 'edit', 'MultiEdit': 'edit', 'Bash': 'bash',
          'Glob': 'glob', 'Grep': 'grep', 'LS': 'list', 'WebFetch': 'webfetch', 'WebSearch': 'websearch',
          'Task': 'task', 'Agent': 'task', 'Skill': 'skill', 'TodoWrite': 'todowrite', 'TodoRead': 'todoread'}
+AGENT_COLORS = ('primary', 'secondary', 'accent', 'success', 'warning', 'error', 'info')
+HEX_COLOR = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 
 def agent_convert(meta):
@@ -405,6 +407,12 @@ def agent_convert(meta):
     result.setdefault('mode', 'subagent')
     if result['mode'] not in ('primary', 'subagent', 'all'):
         fail('Unsupported agent mode.')
+    color = result.get('color')
+    if color is not None:
+        acceptable = isinstance(color, str) and (HEX_COLOR.match(color) or color in AGENT_COLORS)
+        if not acceptable:
+            fail(f'Agent color {color!r} is not a value OpenCode accepts; '
+                 f'use a #rrggbb hex color or one of {", ".join(AGENT_COLORS)}.')
     model = meta.get('model')
     if model and model != 'inherit':
         if isinstance(model, str) and '/' in model:

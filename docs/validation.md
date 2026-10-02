@@ -4,7 +4,7 @@ Validated on 2026-09-21 using macOS, Python 3.9.6 and OpenCode 1.18.31.
 
 ## Automated checks
 
-**76 unit/integration tests passed** with:
+**79 unit/integration tests passed** with:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
@@ -30,6 +30,10 @@ Coverage includes:
   including under `--force`, while genuinely upstream-removed components still are.
 - The manual migration list is not carried over from a previous run when a run fails
   before any component is converted.
+- Agent `color` values: a `#rrggbb` hex or one of the eight semantic names is imported, a CSS
+  color name such as `orange` fails before installation, and `--skip-unsupported` skips that
+  agent while installing the rest. The accepted set was measured against OpenCode rather than
+  assumed; see [known issues](known-issues.md).
 - `--manual-mode` printing a copy script for skills, agents and MCP without writing.
 - The merged MCP document being valid JSON and the installed server names being reported.
 - `--status` reporting installed namespaces, source, revision and item presence without a
