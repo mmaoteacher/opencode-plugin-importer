@@ -501,6 +501,122 @@ class ImporterTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.dest.exists())
 
+    def test_manual_mode_comments_the_components_it_refused_to_convert(self):
+        self.skill('ok')
+        self.skill('z-guarded', extra='allowed-tools: [Bash]\n')
+        self.agent('tinted', extra='color: orange\n')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch.object(im, 'warn'):
+            self.install(skip=True, manual=True)
+        printed = output.getvalue()
+        self.assertIn('cp -R', printed)
+        self.assertIn('# Not copied:', printed)
+        self.assertIn('skills/demo-z-guarded', printed)
+        self.assertIn('repair: remove allowed-tools', printed)
+        self.assertIn('agents/demo-tinted.md', printed)
+        self.assertIn('repair: choose a value yourself', printed)
+        self.assertFalse(self.dest.exists())
+
+    def test_manual_mode_prints_clean_script_when_nothing_is_refused(self):
+        self.skill('hello')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.install(manual=True)
+        self.assertNotIn('# Not copied:', output.getvalue())
+
+    def test_strict_run_reports_every_refused_component_at_once(self):
+        self.skill('a-guarded', extra='allowed-tools: [Bash]\n')
+        self.skill('b-plain')
+        self.agent('tinted', extra='color: orange\n')
+        report = self.base / 'report.json'
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status = im.main([str(self.source), '--config-dir', str(self.dest), '--report', str(report)])
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(report.read_text())['issue_count'], 2)
+        self.assertIn('2 component(s) cannot be represented', errors.getvalue())
+        # Strict mode still writes nothing, it just collects before aborting.
+        self.assertFalse(self.dest.exists())
+
+    def test_report_lists_issue_with_repair_options_on_failure(self):
+        self.skill('hello')
+        self.agent('tinted', extra='color: orange\n')
+        report = self.base / 'report.json'
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status = im.main([str(self.source), '--config-dir', str(self.dest), '--report', str(report)])
+        self.assertEqual(status, 1)
+        self.assertIn('cannot be represented', errors.getvalue())
+        document = json.loads(report.read_text())
+        self.assertEqual(document['issue_count'], 1)
+        issue = document['issues'][0]
+        self.assertEqual(issue['export'], 'agents/demo-tinted.md')
+        self.assertEqual(issue['kind'], 'agents')
+        self.assertEqual(issue['key'], 'color')
+        self.assertEqual(issue['value'], 'orange')
+        self.assertEqual(issue['source_path'], str(self.source / 'agents/tinted.md'))
+        actions = [entry['action'] for entry in issue['repairs']]
+        self.assertEqual(actions[0], 'set')
+        self.assertIn('drop', actions)
+        self.assertEqual(actions[-1], 'ask')
+        self.assertIn({'action': 'set', 'key': 'color', 'value': 'warning',
+                       'note': 'OpenCode semantic color.'}, issue['repairs'])
+
+    def test_report_suggests_the_portable_subset_of_agent_tools(self):
+        self.agent('mixed', extra='tools: [Read, Bash, mcp__gitlab__get_merge_request]\n')
+        report = self.base / 'report.json'
+        with contextlib.redirect_stderr(io.StringIO()):
+            im.main([str(self.source), '--config-dir', str(self.dest), '--report', str(report)])
+        issue = json.loads(report.read_text())['issues'][0]
+        self.assertEqual(issue['value'], 'mcp__gitlab__get_merge_request')
+        first = issue['repairs'][0]
+        self.assertEqual(first['action'], 'set')
+        self.assertEqual(first['value'], ['Read', 'Bash'])
+        self.assertIn("'mcp__gitlab__get_merge_request'", first['note'])
+
+    def test_report_offers_model_inherit_for_an_alias(self):
+        self.agent('aliased', extra='model: sonnet\n')
+        report = self.base / 'report.json'
+        with contextlib.redirect_stderr(io.StringIO()):
+            im.main([str(self.source), '--config-dir', str(self.dest), '--report', str(report)])
+        issue = json.loads(report.read_text())['issues'][0]
+        self.assertEqual(issue['key'], 'model')
+        self.assertEqual(issue['value'], 'sonnet')
+        self.assertEqual(issue['repairs'][0], {'action': 'set', 'key': 'model', 'value': 'inherit',
+                                              'note': 'Use the host default model.'})
+
+    def test_report_names_every_unsupported_skill_key(self):
+        self.skill('hello')
+        self.skill('z-guarded', extra='allowed-tools: [Bash]\nuser-invocable: false\n')
+        report = self.base / 'report.json'
+        with contextlib.redirect_stderr(io.StringIO()):
+            status = im.main([str(self.source), '--config-dir', str(self.dest), '--report', str(report)])
+        self.assertEqual(status, 1)
+        issue = json.loads(report.read_text())['issues'][0]
+        self.assertEqual(issue['export'], 'skills/demo-z-guarded')
+        self.assertEqual(issue['kind'], 'skills')
+        dropped = [entry['key'] for entry in issue['repairs'] if entry['action'] == 'drop']
+        self.assertEqual(sorted(dropped), ['allowed-tools', 'user-invocable'])
+        self.assertEqual(issue['repairs'][-1]['action'], 'ask')
+
+    def test_report_records_skipped_components_and_writes_nothing_else(self):
+        self.skill('hello')
+        self.skill('z-guarded', extra='allowed-tools: [Bash]\n')
+        report = self.base / 'report.json'
+        with mock.patch.object(im, 'warn'):
+            status = im.main([str(self.source), '--config-dir', str(self.dest),
+                              '--skip-unsupported', '--report', str(report)])
+        self.assertEqual(status, 0)
+        self.assertTrue((self.dest / 'skills/demo-hello').exists())
+        document = json.loads(report.read_text())
+        self.assertEqual(document['issue_count'], 1)
+        self.assertEqual(document['issues'][0]['export'], 'skills/demo-z-guarded')
+
+    def test_report_is_absent_without_the_flag(self):
+        self.skill('hello')
+        self.install()
+        self.assertFalse((self.base / 'report.json').exists())
+
     def test_agent_color_must_be_a_value_opencode_accepts(self):
         self.agent('reviewer', extra='color: orange\n')
         with self.assertRaisesRegex(im.ImportErrorDetail, 'Agent color'):

@@ -80,12 +80,25 @@ Alternatively run `python skills/install-plugin/scripts/importer.py` directly.
 # Use a different destination/prefix or select component types
 ./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin --config-dir /tmp/opencode-preview --dry-run
 ./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin --namespace my-team --skills-only --agents-only
+
+# Machine-readable list of what could not be converted, with repair options
+./skills/install-plugin/scripts/install-plugin.sh /path/to/plugin --report /tmp/import-report.json
 ```
 
 Default destination: `OPENCODE_CONFIG_DIR`, otherwise `$XDG_CONFIG_HOME/opencode`
 (default `~/.config/opencode`). `--config-dir` takes precedence.
 Preview/listing may clone Git into a temporary directory; **neither writes the destination**.
 Embedded HTTPS credentials are rejected; use your existing Git credentials or SSH.
+
+`--report <path>` records every component refused as unsupported: the offending key and value,
+the reason, and the repairs the importer could determine — set a key to a given value, drop it,
+or `ask` when no portable answer exists. It is written on success and on failure, so it also
+shows what a `--skip-unsupported` run left out. Repairs are applied to the **source**, never to
+the destination, and the import is then re-run. A strict run collects every refused component
+before aborting, so one report covers one decision per component; within a single component
+conversion still stops at the first unconvertible field, so re-run after each fix. The importer
+never guesses where guessing would be wrong: an MCP tool name depends on the installed server,
+and a model alias needs a provider it cannot see, so those surface as `ask`.
 
 ### Source support
 
@@ -204,7 +217,9 @@ temporary directory and prints the path; review it before deleting anything.
   and writes nothing.
 - `--manual-mode` prints a reviewable `sh` copy script without writing the destination. It
   copies original source files, so frontmatter conversion is not applied; MCP servers are
-  listed as a comment to merge by hand.
+  listed as a comment to merge by hand. Components that could not be converted appear as
+  comments naming the source path, the reason and the repair options, rather than being
+  missing from the script.
 - JSON and JSONC are accepted. MCP servers are merged into the `mcp` object of the existing
   `opencode.json` / `opencode.jsonc`; no separate MCP JSON file is created in the
   destination. Updates preserve unrelated configuration values, but normalize

@@ -4,7 +4,7 @@ Validated on 2026-09-21 using macOS, Python 3.9.6 and OpenCode 1.18.31.
 
 ## Automated checks
 
-**79 unit/integration tests passed** with:
+**88 unit/integration tests passed** with:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
@@ -34,6 +34,13 @@ Coverage includes:
   color name such as `orange` fails before installation, and `--skip-unsupported` skips that
   agent while installing the rest. The accepted set was measured against OpenCode rather than
   assumed; see [known issues](known-issues.md).
+- `--report`: written on success and on failure, listing the refused export, kind, offending
+  key and value, source path and repair candidates; absent without the flag. Repair candidates
+  are deterministic — `model: sonnet` offers `inherit`, an agent tool list offers the subset with
+  portable names, and a skill restriction offers removing the key — with `ask` last where no
+  portable answer exists.
+- `--manual-mode` comments the components it refused to convert, naming the source path, the
+  reason and each repair, and stays silent when nothing was refused.
 - `--manual-mode` printing a copy script for skills, agents and MCP without writing.
 - The merged MCP document being valid JSON and the installed server names being reported.
 - `--status` reporting installed namespaces, source, revision and item presence without a

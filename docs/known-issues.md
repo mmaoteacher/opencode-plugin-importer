@@ -47,17 +47,20 @@ OpenCode documents, and stating plainly in the README that a preview is not a lo
 
 ## 3. `--manual-mode` omits exactly the components that could not be converted
 
+**Status** fixed on `fix/opencode-load-validation`
+
 In `build_payload`, a component that is skipped under `--skip-unsupported` is `continue`d before
 `migration_log.append(...)` runs, and `print_manual_script` iterates `desired`. The manual script
-therefore contains only the components that converted cleanly — the incompatible ones are
+therefore contained only the components that converted cleanly — the incompatible ones were
 missing.
 
-That is the opposite of what "manual migration" suggests. A user who runs
-`--skip-unsupported --manual-mode` to hand-finish the awkward parts gets a script for the parts
-that needed no work, and no pointer to the parts that do.
+That is the opposite of what "manual migration" suggests. A user who ran
+`--skip-unsupported --manual-mode` to hand-finish the awkward parts got a script for the parts
+that needed no work, and no pointer to the parts that did.
 
-Including skipped components as commented-out copy lines, with their source path, would make the
-script usable for its stated purpose.
+The script now comments each refused component with its source path, the reason and its repair
+options, so the file is usable for the purpose its name implies. The candidates come from the
+same data `--report` emits.
 
 ## 4. Agents are written to `agents/` while OpenCode also reads `agent/`
 
